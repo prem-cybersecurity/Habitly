@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Habitly Admin</title>
+<link rel="icon" type="image/svg+xml" href="favicon.svg" />
+<link rel="stylesheet" href="admin.css" />
+</head>
+<body>
+<div class="admin-shell">
+  <div class="admin-brand"><span>H</span><strong>HABITLY BY PRK</strong><small>ADMIN</small></div>
+
+  <section class="admin-card" id="loginCard">
+    <div class="admin-icon">🔐</div>
+    <p class="eyebrow">PRIVATE AREA</p>
+    <h1>Admin Login</h1>
+    <p class="muted">Only the Habitly admin account can access visitor information.</p>
+    <form id="loginForm">
+      <label>Email<input id="adminEmail" type="email" autocomplete="username" value="prem.cybersecurity@gmail.com" required placeholder="Admin email" /></label>
+      <label>Password<input id="adminPassword" type="password" autocomplete="current-password" required placeholder="Password" /></label>
+      <button class="primary" type="submit">Sign In <span>→</span></button>
+      <p class="error" id="loginError"></p>
+    </form>
+    <p class="setup-note">Supabase must be configured in <code>config.js</code> and the admin role must be assigned in the database.</p>
+  </section>
+
+  <section class="admin-card dashboard-card hidden" id="dashboardCard">
+    <div class="dashboard-head">
+      <div>
+        <p class="eyebrow">PRIVATE DASHBOARD</p>
+        <h1>Visitor Records</h1>
+        <p class="muted">Names and email addresses submitted through Habitly's welcome page.</p>
+      </div>
+      <button class="secondary" id="logoutBtn">Sign Out</button>
+    </div>
+    <div class="metrics"><div><span id="visitorCount">0</span><small>Total Visitors</small></div><div><span id="lastJoined">—</span><small>Latest Join</small></div></div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Name</th><th>Email</th><th>Joined</th><th>Last Seen</th><th>Visits</th></tr></thead>
+        <tbody id="visitorTableBody"></tbody>
+      </table>
+    </div>
+    <p class="empty" id="emptyVisitors">No visitor records yet.</p>
+  </section>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="config.js"></script>
+<script src="admin.js"></script>
+</body>
+</html>
