@@ -5,6 +5,13 @@
   "display": "standalone",
   "background_color": "#080808",
   "theme_color": "#080808",
-  "description": "A focused personal habit tracker by Prem Kumar.",
-  "icons": [{"src":"favicon.svg","sizes":"any","type":"image/svg+xml","purpose":"any maskable"}]
+  "description": "A simple, focused personal habit tracker.",
+  "icons": [
+    {
+      "src": "favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
 }
