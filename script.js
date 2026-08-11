@@ -48,10 +48,10 @@ const LS_KEYS = {
   records: 'habitly_records',
   goals: 'habitly_goals',
   achievements: 'habitly_achievements',
-  notes: 'habitly_notes',
   settings: 'habitly_settings',
   reminders: 'habitly_reminders',
   profile: 'habitly_profile',
+  session: 'habitly_session',
   seeded: 'habitly_seeded'
 };
 
@@ -85,7 +85,6 @@ const state = {
   records: {},
   goals: [],
   achievementsUnlocked: {},
-  notes: {},
   settings: { theme: 'dark' },
   reminders: [],
   currentView: 'dashboard',
@@ -99,6 +98,7 @@ const state = {
   editingGoalId: null,
   confirmCallback: null,
   profile: null,
+  sessionActive: false,
   notificationTimer: null,
   editingReminderId: null,
   reminderAlert: null,
@@ -124,11 +124,12 @@ function loadState(){
     state.records = {};
     state.goals = [];
     state.achievementsUnlocked = {};
-    state.notes = {};
     state.settings = { theme: 'dark' };
     state.reminders = [];
     state.profile = null;
+    state.sessionActive = false;
     persistAll();
+    lsSet(LS_KEYS.session, false);
     lsSet(LS_KEYS.profile, null);
     lsSet(LS_KEYS.seeded, true);
   } else {
@@ -145,12 +146,12 @@ function loadState(){
     state.records = lsGet(LS_KEYS.records, {});
     state.goals = lsGet(LS_KEYS.goals, []);
     state.achievementsUnlocked = lsGet(LS_KEYS.achievements, {});
-    state.notes = lsGet(LS_KEYS.notes, {});
     state.settings = lsGet(LS_KEYS.settings, { theme: 'dark' });
     state.reminders = lsGet(LS_KEYS.reminders, []);
     if (!Array.isArray(state.reminders)) state.reminders = [];
     if (!state.settings?.theme) state.settings = { ...state.settings, theme: 'dark' };
     state.profile = lsGet(LS_KEYS.profile, null);
+    state.sessionActive = lsGet(LS_KEYS.session, false) === true;
     state.habits.forEach(h => { if(h.reminder && !h.reminderSound) h.reminderSound = 'gentle'; });
     if(state.reminders.length === 0){ state.reminders = state.habits.filter(h=>h.reminder).map(h=>({id:uid('r'),habitId:h.id,time:h.reminder,sound:h.reminderSound||'gentle',enabled:true})); }
     saveHabits();
@@ -163,16 +164,15 @@ function persistAll(){
   lsSet(LS_KEYS.records, state.records);
   lsSet(LS_KEYS.goals, state.goals);
   lsSet(LS_KEYS.achievements, state.achievementsUnlocked);
-  lsSet(LS_KEYS.notes, state.notes);
   lsSet(LS_KEYS.settings, state.settings);
   lsSet(LS_KEYS.reminders, state.reminders);
   lsSet(LS_KEYS.profile, state.profile);
+  lsSet(LS_KEYS.session, state.sessionActive === true);
 }
 function saveHabits(){ lsSet(LS_KEYS.habits, state.habits); }
 function saveRecords(){ lsSet(LS_KEYS.records, state.records); }
 function saveGoals(){ lsSet(LS_KEYS.goals, state.goals); }
 function saveAchievements(){ lsSet(LS_KEYS.achievements, state.achievementsUnlocked); }
-function saveNotes(){ lsSet(LS_KEYS.notes, state.notes); }
 function saveSettings(){ lsSet(LS_KEYS.settings, state.settings); }
 function saveReminders(){ lsSet(LS_KEYS.reminders, state.reminders); }
 
@@ -420,8 +420,6 @@ function renderDashboard(){
   renderTodayHabitsList();
   renderReminders();
 
-  const noteInput = document.getElementById('dailyNoteInput');
-  noteInput.value = state.notes[today] || '';
 }
 
 function renderMomentum(stats){
@@ -1196,9 +1194,26 @@ function snoozeAlert(){const r=state.reminderAlert?.reminder;if(!r)return;setRem
 function showWelcomeScreen(){
   const screen = document.getElementById('welcomeScreen');
   if(!screen) return;
+  const nameInput=document.getElementById('welcomeName');
+  const emailInput=document.getElementById('welcomeEmail');
+  const consent=document.getElementById('welcomeConsent');
+  if(state.profile){
+    if(nameInput) nameInput.value=state.profile.name || '';
+    if(emailInput) emailInput.value=state.profile.email || '';
+    if(consent) consent.checked=state.profile.shareRecords !== false;
+    const heading=screen.querySelector('.welcome-form-head h2');
+    const sub=screen.querySelector('.welcome-form-head > p:last-child');
+    if(heading) heading.textContent='Welcome back to Habitly';
+    if(sub) sub.textContent='Continue with your profile to pick up where you left off.';
+  }else{
+    const heading=screen.querySelector('.welcome-form-head h2');
+    const sub=screen.querySelector('.welcome-form-head > p:last-child');
+    if(heading) heading.textContent='Welcome to Habitly';
+    if(sub) sub.textContent="Let's get started with your profile.";
+  }
   screen.classList.add('open');
   screen.setAttribute('aria-hidden','false');
-  document.getElementById('welcomeName')?.focus();
+  setTimeout(()=>nameInput?.focus(),80);
 }
 
 function hideWelcomeScreen(){
@@ -1213,10 +1228,8 @@ function updateProfileUI(){
   const email = state.profile?.email || 'No email saved';
   const nameEl=document.getElementById('profileNameDisplay');
   const emailEl=document.getElementById('profileEmailDisplay');
-  const avatar=document.getElementById('profileAvatar');
   if(nameEl) nameEl.textContent=name;
   if(emailEl) emailEl.textContent=email;
-  if(avatar) avatar.textContent=(name.trim()[0] || 'P').toUpperCase();
 }
 
 async function registerVisitorRemotely(profile){
@@ -1233,21 +1246,22 @@ async function registerVisitorRemotely(profile){
 
 async function saveProfile(name,email,shareRecords=state.profile?.shareRecords ?? true){
   state.profile={name:name.trim(),email:email.trim().toLowerCase(),updatedAt:new Date().toISOString(),shareRecords};
+  state.sessionActive=true;
   lsSet(LS_KEYS.profile,state.profile);
+  lsSet(LS_KEYS.session,true);
   updateProfileUI();
   if(shareRecords) await registerVisitorRemotely(state.profile);
 }
 
 function logoutLocalProfile(){
-  showConfirm('Log out of Habitly?', 'You will return to the welcome page. Your habits and progress stay on this browser until you choose Reset All Data.', ()=>{
-    localStorage.removeItem(LS_KEYS.profile);
+  showConfirm('Log out of Habitly?', 'You will return to the welcome page. Your profile, habits and progress will stay on this browser so you can continue later.', ()=>{
+    state.sessionActive=false;
+    lsSet(LS_KEYS.session,false);
     localStorage.removeItem('habitly_notified_reminders');
     localStorage.removeItem('habitly_reminder_snoozes');
-    state.profile=null;
-    updateProfileUI();
     setView('dashboard');
     showWelcomeScreen();
-    showToast('You have been logged out');
+    showToast('Logged out. Your data is safe.');
   });
 }
 
@@ -1271,7 +1285,9 @@ function setupProfile(){
     const shareRecords=document.getElementById('welcomeConsent')?.checked !== false;
     if(!name || !/^\S+@\S+\.\S+$/.test(email)){ showToast('Please enter your name and a valid email'); return; }
     state.profile={name:name.trim(),email,updatedAt:new Date().toISOString(),shareRecords};
+    state.sessionActive=true;
     lsSet(LS_KEYS.profile,state.profile);
+    lsSet(LS_KEYS.session,true);
     updateProfileUI();
     if(shareRecords) await registerVisitorRemotely(state.profile);
     hideWelcomeScreen();
@@ -1281,6 +1297,8 @@ function setupProfile(){
   });
   document.getElementById('editProfileBtn')?.addEventListener('click',editProfile);
   document.getElementById('logoutBtn')?.addEventListener('click',logoutLocalProfile);
+  document.getElementById('sidebarLogoutBtn')?.addEventListener('click',logoutLocalProfile);
+  document.getElementById('mobileLogoutBtn')?.addEventListener('click',logoutLocalProfile);
 }
 
 /* ----------------------------- REMINDER NOTIFICATIONS ----------------------------- */
@@ -1371,7 +1389,6 @@ function exportData(){
     records: state.records,
     goals: state.goals,
     achievementsUnlocked: state.achievementsUnlocked,
-    notes: state.notes,
     settings: state.settings,
     reminders: state.reminders,
     profile: state.profile,
@@ -1403,10 +1420,10 @@ function importData(file){
         state.records = data.records || {};
         state.goals = data.goals || [];
         state.achievementsUnlocked = data.achievementsUnlocked || {};
-        state.notes = data.notes || {};
         state.settings = data.settings || { theme:'dark' };
         state.reminders = Array.isArray(data.reminders) ? data.reminders : [];
         state.profile = data.profile || null;
+        state.sessionActive = !!state.profile;
         if(!state.reminders.length) state.reminders=state.habits.filter(h=>h.reminder).map(h=>({id:uid('r'),habitId:h.id,time:h.reminder,sound:h.reminderSound||'gentle',enabled:true}));
         persistAll();
         lsSet(LS_KEYS.seeded, true);
@@ -1423,7 +1440,7 @@ function importData(file){
 }
 
 function resetAllData(){
-  showConfirm('Reset all data?', 'Every habit, record, goal and note will be permanently deleted. This cannot be undone.', ()=>{
+  showConfirm('Reset all data?', 'Every habit, record, goal, achievement and reminder will be permanently deleted. This cannot be undone.', ()=>{
     Object.values(LS_KEYS).forEach(k=> localStorage.removeItem(k));
     localStorage.removeItem('habitly_reminder_snoozes');
     loadState();
@@ -1453,14 +1470,13 @@ function closeConfirm(){
 /* -------------------------------- EVENT WIRING -------------------------------- */
 
 function setupEventListeners(){
-  document.querySelectorAll('.nav-item, .bnav-item').forEach(btn=>{
+  document.querySelectorAll('.nav-item, .bnav-item:not(.bnav-logout)').forEach(btn=>{
     btn.addEventListener('click', ()=> setView(btn.dataset.view));
   });
 
   document.getElementById('dashboardThemeToggle')?.addEventListener('click', ()=>{
     setTheme(state.settings.theme === 'dark' ? 'light' : 'dark');
   });
-  document.getElementById('sidebarLogoutBtn')?.addEventListener('click', logoutLocalProfile);
 
   // dashboard category filters
   document.getElementById('categoryFilterChips').addEventListener('click', (e)=>{
@@ -1478,14 +1494,6 @@ function setupEventListeners(){
     chip.classList.add('active');
     state.manageCategoryFilter = chip.dataset.cat;
     renderHabitsManage();
-  });
-
-  // note
-  document.getElementById('saveNoteBtn').addEventListener('click', ()=>{
-    const val = document.getElementById('dailyNoteInput').value.trim();
-    state.notes[todayStr()] = val;
-    saveNotes();
-    showToast('Note saved');
   });
 
   // habit modal
@@ -1573,7 +1581,7 @@ function init(){
   setupEventListeners();
   setView('dashboard');
   updateProfileUI();
-  if(!state.profile) showWelcomeScreen();
+  if(!state.profile || !state.sessionActive) showWelcomeScreen();
 
   // keep dashboard/reminders time-aware
   setInterval(()=>{

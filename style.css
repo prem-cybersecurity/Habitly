@@ -3284,3 +3284,45 @@ textarea:focus-visible {
 [data-theme="light"] .welcome-screen{background:#ececea}.welcome-form-panel{background:#fafaf8}.welcome-form-head h2{color:#151515}.welcome-form-head>p:last-child,.welcome-field>span{color:#62625f}.welcome-input-wrap{background:#fff;border-color:#d8d8d3}.welcome-input-wrap input{color:#151515}.welcome-input-wrap input::placeholder{color:#9b9b96}.welcome-consent{color:#676762}.welcome-consent-note{color:#8b8b85}.welcome-submit{background:#151515;color:#fff}.welcome-visual-panel{background:#111}.welcome-copy-block h1{color:#fff}.welcome-copy-block p{color:#bdbdbd}
 @media(max-width:760px){.main{padding:20px 14px 92px}.momentum-card{grid-template-columns:1fr auto;gap:12px}.momentum-meter{grid-column:1/-1;grid-row:2}.momentum-value{grid-column:2;grid-row:1}.reminder-section-head{align-items:flex-start}.reminder-timeline-item{grid-template-columns:68px 8px 36px minmax(0,1fr) auto;gap:8px;padding:12px}.reminder-name-wrap small{font-size:9px}.settings-reminder-row{padding:10px}.achievement-summary{margin-left:auto}.achievement-feature-card{padding:14px}.achievements-grid{grid-template-columns:1fr 1fr}.achievement-card-v2{min-height:166px;flex-direction:column}.achievement-badge{width:48px;height:48px;flex-basis:48px}.welcome-screen{padding:0;align-items:stretch}.welcome-card{width:100%;min-height:100vh;border-radius:0;border:0;display:flex;flex-direction:column}.welcome-visual-panel{min-height:53vh;flex:0 0 53vh}.welcome-copy-block{left:24px;bottom:28px}.welcome-copy-block h1{font-size:34px}.welcome-topline{left:24px;top:24px}.welcome-form-panel{flex:1;padding:28px 22px 34px;justify-content:flex-start}.welcome-form-head h2{font-size:27px}.welcome-form-head{margin-bottom:20px}.welcome-input-wrap{height:52px}.welcome-consent-note{margin-left:26px}.progress-inline-pct{width:36px}.qty-control{gap:9px}.qty-value{min-width:76px}.bar-row{grid-template-columns:62px 1fr 42px}.perf-name{width:115px}}
 @media(max-width:420px){.achievements-grid{grid-template-columns:1fr}.achievement-card-v2{flex-direction:row;min-height:150px}.welcome-copy-block h1{font-size:31px}.welcome-visual-panel{min-height:50vh;flex-basis:50vh}.welcome-form-panel{padding:24px 18px 30px}}
+
+
+/* ===================== PROFILE / MOBILE LOGOUT POLISH ===================== */
+.profile-settings-card {
+  align-items: center;
+}
+.profile-settings-info {
+  min-width: 0;
+}
+.profile-settings-info strong {
+  display: block;
+  font-size: 16px;
+}
+.profile-settings-info .subtle {
+  display: block;
+}
+.bnav-logout {
+  color: #ef4444 !important;
+}
+.bnav-logout:hover, .bnav-logout:focus-visible {
+  color: #fff !important;
+  background: #ef4444 !important;
+}
+[data-theme="light"] .bnav-logout {
+  color: #dc2626 !important;
+}
+@media (max-width: 760px) {
+  .bottom-nav {
+    gap: 2px;
+  }
+  .bnav-item {
+    min-width: 0;
+    padding-left: 3px;
+    padding-right: 3px;
+  }
+  .bnav-item small {
+    font-size: 9px;
+  }
+  .bnav-logout span {
+    color: inherit;
+  }
+}
