@@ -3623,3 +3623,145 @@ textarea:focus-visible {
   -webkit-text-fill-color: #151515;
   -webkit-box-shadow: 0 0 0 1000px #ffffff inset;
 }
+
+
+/* ===================== FINAL POLISH LAYER ===================== */
+:root {
+  --accent-2: #8b5cf6;
+  --accent-3: #3b82f6;
+  --success: #22c55e;
+  --warning: #f59e0b;
+  --danger: #ef4444;
+}
+
+/* Accessible keyboard focus without changing the visual identity. */
+:focus-visible {
+  outline: 2px solid var(--accent-2);
+  outline-offset: 3px;
+}
+
+/* Make progress feel intentional rather than like a default HTML bar. */
+.bar-track,
+.perf-track,
+.momentum-meter {
+  background: linear-gradient(180deg, rgba(255,255,255,.07), rgba(255,255,255,.035));
+  border: 1px solid rgba(255,255,255,.055);
+  box-shadow: inset 0 1px 2px rgba(0,0,0,.35);
+}
+
+.bar-track,
+.perf-track { height: 10px; border-radius: 999px; overflow: hidden; }
+.bar-fill,
+.perf-fill,
+.momentum-fill {
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent-2), var(--accent-3));
+  box-shadow: 0 0 14px rgba(124,58,237,.22);
+  transition: width .55s cubic-bezier(.22,1,.36,1);
+}
+
+.progress-ring .ring-fg {
+  filter: drop-shadow(0 0 6px rgba(124,58,237,.22));
+  transition: stroke-dashoffset .7s cubic-bezier(.22,1,.36,1), stroke .25s ease;
+}
+
+.summary-card {
+  position: relative;
+  overflow: hidden;
+  transition: transform .18s ease, border-color .18s ease, box-shadow .18s ease;
+}
+.summary-card::after {
+  content: "";
+  position: absolute;
+  inset: auto -20% -65% 35%;
+  height: 110px;
+  background: radial-gradient(circle, rgba(124,58,237,.10), transparent 65%);
+  pointer-events: none;
+}
+.summary-card:hover { transform: translateY(-2px); border-color: rgba(139,92,246,.34); box-shadow: 0 12px 32px rgba(0,0,0,.18); }
+
+/* Quick actions */
+.quick-actions-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+.quick-action {
+  min-height: 82px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  text-align: left;
+  padding: 14px;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: linear-gradient(145deg, var(--surface), var(--surface-2));
+  color: var(--text);
+  transition: transform .18s ease, border-color .18s ease, background .18s ease;
+}
+.quick-action:hover { transform: translateY(-2px); border-color: rgba(139,92,246,.42); }
+.quick-action:active { transform: translateY(0); }
+.quick-action-icon {
+  width: 38px; height: 38px; flex: 0 0 38px;
+  display: grid; place-items: center;
+  border-radius: 11px;
+  background: rgba(124,58,237,.12);
+  border: 1px solid rgba(124,58,237,.22);
+  font-size: 19px;
+}
+.quick-action strong { display:block; font-size:13px; margin-bottom:3px; }
+.quick-action small { display:block; color:var(--text-muted); font-size:10.5px; line-height:1.35; }
+
+/* Better empty states: useful instead of dead ends. */
+.empty-state {
+  min-height: 110px;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  gap:10px;
+  flex-wrap:wrap;
+  padding:22px;
+  border:1px dashed var(--border);
+  border-radius:14px;
+  color:var(--text-muted);
+  background:rgba(255,255,255,.012);
+}
+.empty-state > span { font-size:24px; }
+.empty-state > div { min-width:170px; }
+.empty-state strong { color:var(--text); display:block; margin-bottom:3px; }
+.empty-state p { margin:0; font-size:12px; }
+
+/* Completion state */
+.progress-card.complete,
+.momentum-card.complete { border-color: rgba(34,197,94,.35); }
+.progress-card.complete .ring-fg { filter: drop-shadow(0 0 8px rgba(34,197,94,.28)); }
+
+/* Cleaner reminder alert */
+.reminder-alert-card { animation: reminderIn .25s cubic-bezier(.22,1,.36,1); }
+@keyframes reminderIn { from { opacity:0; transform:translateY(10px) scale(.98); } to { opacity:1; transform:none; } }
+
+/* Respect users who prefer reduced motion. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior:auto !important; animation-duration:.01ms !important; animation-iteration-count:1 !important; transition-duration:.01ms !important; }
+}
+
+[data-theme="light"] .bar-track,
+[data-theme="light"] .perf-track,
+[data-theme="light"] .momentum-meter {
+  background: #ecece9;
+  border-color: #deded9;
+  box-shadow: inset 0 1px 2px rgba(0,0,0,.06);
+}
+[data-theme="light"] .quick-action { background: linear-gradient(145deg,#fff,#f5f5f2); }
+[data-theme="light"] .quick-action:hover { border-color: rgba(109,40,217,.34); }
+
+@media (max-width: 900px) {
+  .quick-actions-grid { grid-template-columns: repeat(2, minmax(0,1fr)); }
+}
+@media (max-width: 560px) {
+  .quick-actions-grid { grid-template-columns: 1fr 1fr; gap:9px; }
+  .quick-action { min-height:74px; padding:11px; gap:9px; }
+  .quick-action-icon { width:34px; height:34px; flex-basis:34px; font-size:17px; }
+  .quick-action strong { font-size:12px; }
+  .quick-action small { font-size:9.5px; }
+}

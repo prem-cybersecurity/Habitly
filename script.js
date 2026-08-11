@@ -1478,6 +1478,15 @@ function setupEventListeners(){
     setTheme(state.settings.theme === 'dark' ? 'light' : 'dark');
   });
 
+  document.getElementById('quickActionsGrid')?.addEventListener('click', (e)=>{
+    const action=e.target.closest('[data-quick-action]')?.dataset.quickAction;
+    if(!action) return;
+    if(action==='habit') openAddHabitModal();
+    if(action==='reminder') openAddReminderModal();
+    if(action==='goals') setView('goals');
+    if(action==='stats') setView('statistics');
+  });
+
   // dashboard category filters
   document.getElementById('categoryFilterChips').addEventListener('click', (e)=>{
     const chip = e.target.closest('.chip');

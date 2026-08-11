@@ -6,6 +6,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>Habitly</title>
   <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+  <link rel="manifest" href="manifest.webmanifest" />
+  <meta name="theme-color" content="#080808" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
   <link rel="stylesheet" href="style.css" />
 </head>
 
@@ -197,6 +201,29 @@
             </div>
             <div class="momentum-meter"><div class="momentum-fill" id="momentumFill"></div></div>
             <div class="momentum-value" id="momentumValue">0%</div>
+          </div>
+        </div>
+
+        <div class="section-block quick-actions-section">
+          <div class="section-block-header">
+            <div>
+              <h2>Quick Actions</h2>
+              <p class="subtle">The shortcuts you will use most.</p>
+            </div>
+          </div>
+          <div class="quick-actions-grid" id="quickActionsGrid">
+            <button class="quick-action" type="button" data-quick-action="habit">
+              <span class="quick-action-icon">＋</span><span><strong>Add Habit</strong><small>Create a new routine</small></span>
+            </button>
+            <button class="quick-action" type="button" data-quick-action="reminder">
+              <span class="quick-action-icon">🔔</span><span><strong>Add Reminder</strong><small>Never miss a habit</small></span>
+            </button>
+            <button class="quick-action" type="button" data-quick-action="goals">
+              <span class="quick-action-icon">🎯</span><span><strong>View Goals</strong><small>Keep your targets visible</small></span>
+            </button>
+            <button class="quick-action" type="button" data-quick-action="stats">
+              <span class="quick-action-icon">📊</span><span><strong>View Stats</strong><small>See your consistency</small></span>
+            </button>
           </div>
         </div>
 
