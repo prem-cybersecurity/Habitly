@@ -50,6 +50,7 @@ const LS_KEYS = {
   achievements: 'habitly_achievements',
   notes: 'habitly_notes',
   settings: 'habitly_settings',
+  reminders: 'habitly_reminders',
   profile: 'habitly_profile',
   seeded: 'habitly_seeded'
 };
@@ -86,6 +87,7 @@ const state = {
   achievementsUnlocked: {},
   notes: {},
   settings: { theme: 'dark' },
+  reminders: [],
   currentView: 'dashboard',
   dashboardCategoryFilter: 'all',
   manageCategoryFilter: 'all',
@@ -97,7 +99,10 @@ const state = {
   editingGoalId: null,
   confirmCallback: null,
   profile: null,
-  notificationTimer: null
+  notificationTimer: null,
+  editingReminderId: null,
+  reminderAlert: null,
+  achievementFilter: 'all'
 };
 
 function defaultHabits(){
@@ -105,9 +110,9 @@ function defaultHabits(){
   return [
     { id: uid('h'), name:'Drink Water', icon:'💧', category:'Health', type:'quantity', target:3, unit:'L', frequency:'daily', days:[], reminder:'', enabled:true, createdAt:t, step:0.25 },
     { id: uid('h'), name:'Eat Meals', icon:'🍛', category:'Health', type:'count', target:3, unit:'meals', items:['Breakfast','Lunch','Dinner'], frequency:'daily', days:[], reminder:'', enabled:true, createdAt:t },
-    { id: uid('h'), name:'Drink Milk', icon:'🥛', category:'Health', type:'quantity', target:1, unit:'glass', frequency:'daily', days:[], reminder:'20:00', enabled:true, createdAt:t, step:1 },
+    { id: uid('h'), name:'Drink Milk', icon:'🥛', category:'Health', type:'quantity', target:1, unit:'glass', frequency:'daily', days:[], reminder:'20:00', reminderSound:'gentle', enabled:true, createdAt:t, step:1 },
     { id: uid('h'), name:'Exercise', icon:'🏃', category:'Fitness', type:'quantity', target:30, unit:'minutes', frequency:'daily', days:[], reminder:'', enabled:true, createdAt:t, step:5 },
-    { id: uid('h'), name:'Study', icon:'📚', category:'Study', type:'quantity', target:2, unit:'hours', frequency:'daily', days:[], reminder:'21:30', enabled:true, createdAt:t, step:0.5 },
+    { id: uid('h'), name:'Study', icon:'📚', category:'Study', type:'quantity', target:2, unit:'hours', frequency:'daily', days:[], reminder:'21:30', reminderSound:'chime', enabled:true, createdAt:t, step:0.5 },
     { id: uid('h'), name:'Sleep on Time', icon:'🌙', category:'Personal', type:'quantity', target:8, unit:'hours', frequency:'daily', days:[], reminder:'', enabled:true, createdAt:t, step:0.5 }
   ];
 }
@@ -121,6 +126,7 @@ function loadState(){
     state.achievementsUnlocked = {};
     state.notes = {};
     state.settings = { theme: 'dark' };
+    state.reminders = [];
     state.profile = null;
     persistAll();
     lsSet(LS_KEYS.profile, null);
@@ -141,9 +147,14 @@ function loadState(){
     state.achievementsUnlocked = lsGet(LS_KEYS.achievements, {});
     state.notes = lsGet(LS_KEYS.notes, {});
     state.settings = lsGet(LS_KEYS.settings, { theme: 'dark' });
+    state.reminders = lsGet(LS_KEYS.reminders, []);
+    if (!Array.isArray(state.reminders)) state.reminders = [];
     if (!state.settings?.theme) state.settings = { ...state.settings, theme: 'dark' };
     state.profile = lsGet(LS_KEYS.profile, null);
+    state.habits.forEach(h => { if(h.reminder && !h.reminderSound) h.reminderSound = 'gentle'; });
+    if(state.reminders.length === 0){ state.reminders = state.habits.filter(h=>h.reminder).map(h=>({id:uid('r'),habitId:h.id,time:h.reminder,sound:h.reminderSound||'gentle',enabled:true})); }
     saveHabits();
+    saveReminders();
   }
 }
 
@@ -154,6 +165,7 @@ function persistAll(){
   lsSet(LS_KEYS.achievements, state.achievementsUnlocked);
   lsSet(LS_KEYS.notes, state.notes);
   lsSet(LS_KEYS.settings, state.settings);
+  lsSet(LS_KEYS.reminders, state.reminders);
   lsSet(LS_KEYS.profile, state.profile);
 }
 function saveHabits(){ lsSet(LS_KEYS.habits, state.habits); }
@@ -162,6 +174,7 @@ function saveGoals(){ lsSet(LS_KEYS.goals, state.goals); }
 function saveAchievements(){ lsSet(LS_KEYS.achievements, state.achievementsUnlocked); }
 function saveNotes(){ lsSet(LS_KEYS.notes, state.notes); }
 function saveSettings(){ lsSet(LS_KEYS.settings, state.settings); }
+function saveReminders(){ lsSet(LS_KEYS.reminders, state.reminders); }
 
 /* ---------------------------- HABIT / RECORD LOGIC ---------------------------- */
 
@@ -290,45 +303,29 @@ function earliestHabitDate(){
 /* ------------------------------ ACHIEVEMENTS ------------------------------ */
 
 const ACHIEVEMENT_DEFS = [
-  { id:'first_step', icon:'🏅', title:'First Step', desc:'Complete your first habit.' },
-  { id:'streak_7', icon:'🔥', title:'7-Day Streak', desc:'Maintain a habit for 7 days.' },
-  { id:'streak_30', icon:'🔥', title:'30-Day Streak', desc:'Maintain a habit for 30 days.' },
-  { id:'perfect_week', icon:'💯', title:'Perfect Week', desc:'Complete all active habits for 7 consecutive days.' },
-  { id:'completions_100', icon:'🌟', title:'100 Completions', desc:'Complete 100 habit instances.' }
+  {id:'first_step',icon:'🌱',title:'First Step',desc:'Complete your first habit.',category:'Milestones',target:1,getProgress:()=>totalCompletionsCount()},
+  {id:'streak_3',icon:'🔥',title:'Three in a Row',desc:'Keep a habit going for 3 days.',category:'Streaks',target:3,getProgress:()=>maxHabitStreak()},
+  {id:'streak_7',icon:'🔥',title:'7-Day Streak',desc:'Maintain a habit for 7 days.',category:'Streaks',target:7,getProgress:()=>maxHabitStreak()},
+  {id:'streak_14',icon:'⚡',title:'Two Week Run',desc:'Maintain a habit for 14 days.',category:'Streaks',target:14,getProgress:()=>maxHabitStreak()},
+  {id:'streak_30',icon:'🏔️',title:'30-Day Streak',desc:'Maintain a habit for 30 days.',category:'Streaks',target:30,getProgress:()=>maxHabitStreak()},
+  {id:'streak_60',icon:'💎',title:'60-Day Streak',desc:'Maintain a habit for 60 days.',category:'Streaks',target:60,getProgress:()=>maxHabitStreak()},
+  {id:'perfect_week',icon:'💯',title:'Perfect Week',desc:'Complete all active habits for 7 consecutive days.',category:'Consistency',target:7,getProgress:()=>calcOverallDayStreak().best},
+  {id:'perfect_month',icon:'🌟',title:'Perfect Month',desc:'Complete every scheduled habit for 30 days.',category:'Consistency',target:30,getProgress:()=>calcOverallDayStreak().best},
+  {id:'completions_25',icon:'✨',title:'25 Completions',desc:'Complete 25 habit instances.',category:'Milestones',target:25,getProgress:()=>totalCompletionsCount()},
+  {id:'completions_100',icon:'🏆',title:'100 Completions',desc:'Complete 100 habit instances.',category:'Milestones',target:100,getProgress:()=>totalCompletionsCount()},
+  {id:'completions_250',icon:'👑',title:'250 Completions',desc:'Complete 250 habit instances.',category:'Milestones',target:250,getProgress:()=>totalCompletionsCount()},
+  {id:'habits_5',icon:'🧩',title:'Five Habits',desc:'Build a routine with 5 active habits.',category:'Milestones',target:5,getProgress:()=>state.habits.filter(h=>h.enabled).length},
+  {id:'early_riser',icon:'🌅',title:'Early Riser',desc:'Complete a habit before 8:00 AM on 5 days.',category:'Consistency',target:5,getProgress:()=>countCompletionsByHour(0,8)},
+  {id:'night_owl',icon:'🌙',title:'Night Routine',desc:'Complete a habit after 8:00 PM on 5 days.',category:'Consistency',target:5,getProgress:()=>countCompletionsByHour(20,24)},
+  {id:'goal_one',icon:'🎯',title:'Goal Getter',desc:'Complete your first monthly goal.',category:'Milestones',target:1,getProgress:()=>state.goals.filter(g=>goalProgress(g)>=g.target).length},
+  {id:'habit_variety',icon:'🎨',title:'Well Rounded',desc:'Complete habits from 3 categories.',category:'Milestones',target:3,getProgress:()=>completedCategoryCount()}
 ];
-
-function totalCompletionsCount(){
-  let count = 0;
-  Object.values(state.records).forEach(dayRec=>{
-    Object.values(dayRec).forEach(r=>{ if(r && r.completed) count++; });
-  });
-  return count;
-}
-
-function checkAchievements(){
-  const unlockedNow = {};
-  const totalCompletions = totalCompletionsCount();
-  unlockedNow.first_step = totalCompletions >= 1;
-
-  let maxBest = 0;
-  state.habits.forEach(h=>{ const s = calcHabitStreaks(h); maxBest = Math.max(maxBest, s.best); });
-  unlockedNow.streak_7 = maxBest >= 7;
-  unlockedNow.streak_30 = maxBest >= 30;
-
-  const overall = calcOverallDayStreak();
-  unlockedNow.perfect_week = overall.best >= 7;
-  unlockedNow.completions_100 = totalCompletions >= 100;
-
-  let changed = false;
-  ACHIEVEMENT_DEFS.forEach(def=>{
-    if(unlockedNow[def.id] && !state.achievementsUnlocked[def.id]){
-      state.achievementsUnlocked[def.id] = todayStr();
-      changed = true;
-      showToast(`🏅 Achievement unlocked: ${def.title}`);
-    }
-  });
-  if(changed) saveAchievements();
-}
+function maxHabitStreak(){return state.habits.reduce((m,h)=>Math.max(m,calcHabitStreaks(h).best),0)}
+function completedCategoryCount(){const cats=new Set();Object.entries(state.records).forEach(([ds,recs])=>Object.entries(recs||{}).forEach(([id,r])=>{if(r?.completed){const h=state.habits.find(x=>x.id===id);if(h)cats.add(h.category)}}));return cats.size}
+function countCompletionsByHour(startHour,endHour){let count=0;Object.values(state.records).forEach(recs=>Object.values(recs||{}).forEach(r=>{if(r?.completedAt){const h=new Date(r.completedAt).getHours();if(h>=startHour&&h<endHour)count++}}));return count}
+function totalCompletionsCount(){let count=0;Object.values(state.records).forEach(dayRec=>Object.values(dayRec||{}).forEach(r=>{if(r?.completed)count++}));return count}
+function checkAchievements(){const changed=[];ACHIEVEMENT_DEFS.forEach(def=>{if(Number(def.getProgress?.()||0)>=def.target&&!state.achievementsUnlocked[def.id]){state.achievementsUnlocked[def.id]=todayStr();changed.push(def)}});if(changed.length){saveAchievements();changed.forEach(showAchievementUnlock)}}
+function showAchievementUnlock(def){showToast(`${def.icon} Achievement unlocked: ${def.title}`,3200);const f=document.getElementById('achievementFeature');if(f){f.innerHTML=`<div class="achievement-unlock-card"><span>${def.icon}</span><div><small>ACHIEVEMENT UNLOCKED</small><strong>${escapeHtml(def.title)}</strong><p>${escapeHtml(def.desc)}</p></div></div>`;setTimeout(()=>{if(f)f.innerHTML=''},5000)}}
 
 /* --------------------------------- TOAST --------------------------------- */
 
@@ -418,12 +415,24 @@ function renderDashboard(){
   }
   const overallPct = totalSched ? Math.round((totalDone/totalSched)*100) : 0;
   document.getElementById('overallCompletionVal').textContent = `${overallPct}%`;
+  renderMomentum(stats);
 
   renderTodayHabitsList();
   renderReminders();
 
   const noteInput = document.getElementById('dailyNoteInput');
   noteInput.value = state.notes[today] || '';
+}
+
+function renderMomentum(stats){
+  const fill=document.getElementById('momentumFill'),value=document.getElementById('momentumValue'),title=document.getElementById('momentumTitle'),text=document.getElementById('momentumText');
+  if(!fill||!value||!title||!text)return; const pct=stats.pct||0; fill.style.width=`${pct}%`; value.textContent=`${pct}%`;
+  if(stats.scheduled===0){title.textContent='Start your routine.';text.textContent='Add a habit and make the first step count.'}
+  else if(pct===100){title.textContent='Perfect day. 🔥';text.textContent='Every scheduled habit is complete.'}
+  else if(pct>=80){title.textContent='Finish strong.';text.textContent='You are almost there today.'}
+  else if(pct>=50){title.textContent='Nice momentum.';text.textContent='Keep going and build the streak.'}
+  else if(pct>0){title.textContent='Keep going.';text.textContent='Small progress still counts.'}
+  else {title.textContent='Start small.';text.textContent='One completed habit can change the day.'}
 }
 
 function renderTodayHabitsList(){
@@ -487,6 +496,7 @@ function renderTodayHabitsList(){
         <span class="qty-value">${formatNum(rec.value)} / ${formatNum(habit.target)} ${escapeHtml(habit.unit||'')}</span>
         <button type="button" class="qty-btn" data-act="inc" aria-label="Increase ${escapeHtml(habit.name)}">+</button>
         <div class="progress-bar-track"><div class="progress-bar-fill ${rec.completed?'complete':''}" style="width:${pct}%"></div></div>
+        <span class="progress-inline-pct">${pct}%</span>
       `;
       row.querySelector('[data-act="dec"]').addEventListener('click', ()=> adjustQuantity(habit.id, -habit.step));
       row.querySelector('[data-act="inc"]').addEventListener('click', ()=> adjustQuantity(habit.id, habit.step));
@@ -523,18 +533,22 @@ function toggleHabitCompleteFromCard(habitId){
   const rec = ensureRecord(today, habit);
   if(habit.type === 'boolean'){
     rec.completed = !rec.completed;
+    rec.completedAt = rec.completed ? new Date().toISOString() : null;
   } else if(habit.type === 'quantity'){
     if(rec.completed){
       rec.value = 0;
       rec.completed = false;
+      rec.completedAt = null;
     } else {
       rec.value = habit.target;
       rec.completed = true;
+      rec.completedAt = new Date().toISOString();
     }
   } else if(habit.type === 'count'){
     const done = !!rec.completed;
     rec.items = (habit.items || []).map(()=> !done);
     rec.completed = !done;
+    rec.completedAt = rec.completed ? new Date().toISOString() : null;
   }
   refreshAfterMutation();
 }
@@ -545,6 +559,7 @@ function toggleBooleanHabit(habitId){
   const today = todayStr();
   const rec = ensureRecord(today, habit);
   rec.completed = !rec.completed;
+  rec.completedAt = rec.completed ? new Date().toISOString() : null;
   refreshAfterMutation();
 }
 
@@ -557,6 +572,7 @@ function adjustQuantity(habitId, delta){
   if(val < 0) val = 0;
   rec.value = val;
   rec.completed = computeCompleted(habit, rec);
+  rec.completedAt = rec.completed ? (rec.completedAt || new Date().toISOString()) : null;
   refreshAfterMutation();
 }
 
@@ -567,28 +583,20 @@ function toggleCountItem(habitId, idx){
   const rec = ensureRecord(today, habit);
   rec.items[idx] = !rec.items[idx];
   rec.completed = computeCompleted(habit, rec);
+  rec.completedAt = rec.completed ? (rec.completedAt || new Date().toISOString()) : null;
   refreshAfterMutation();
 }
 
+function getReminderByHabit(habitId){return state.reminders.find(r=>r.habitId===habitId&&r.enabled!==false)||null}
+function syncHabitReminder(habit){const existing=state.reminders.find(r=>r.habitId===habit.id);if(!habit.reminder){state.reminders=state.reminders.filter(r=>r.habitId!==habit.id)}else if(existing){Object.assign(existing,{time:habit.reminder,sound:habit.reminderSound||existing.sound||'gentle',enabled:true})}else{state.reminders.push({id:uid('r'),habitId:habit.id,time:habit.reminder,sound:habit.reminderSound||'gentle',enabled:true})}saveReminders()}
+function repeatLabel(h){if(h.frequency==='daily')return'Every day';const names=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];return(h.days||[]).slice().sort().map(d=>names[d]).join(' · ')||'Selected days'}
+function soundLabel(sound){return({gentle:'Gentle Bell',chime:'Soft Chime',calm:'Calm',classic:'Classic',simple:'Simple',none:'No sound'})[sound]||'Gentle Bell'}
 function renderReminders(){
-  const container = document.getElementById('remindersList');
-  const today = todayStr();
-  const items = state.habits
-    .filter(h => h.enabled && h.reminder && isHabitScheduledOnDate(h, today))
-    .filter(h => { const rec = getRecord(today, h.id); return !(rec && rec.completed); })
-    .sort((a,b)=> a.reminder.localeCompare(b.reminder));
-
-  if(items.length === 0){
-    container.innerHTML = `<div class="empty-state"><span>⏰</span>No pending reminders. Nice work!</div>`;
-    return;
-  }
-  container.innerHTML = items.map(h=>`
-    <div class="reminder-item">
-      <span class="reminder-time">${formatTime12(h.reminder)}</span>
-      <span class="habit-icon">${h.icon}</span>
-      <span class="reminder-name">${escapeHtml(h.name)}</span>
-    </div>
-  `).join('');
+  const container=document.getElementById('remindersList'),today=todayStr();
+  const items=state.reminders.map(r=>({r,h:state.habits.find(h=>h.id===r.habitId)})).filter(x=>x.h&&x.r.enabled!==false&&x.h.enabled&&isHabitScheduledOnDate(x.h,today)).filter(x=>{const rec=getRecord(today,x.h.id);return!(rec&&rec.completed)}).sort((a,b)=>a.r.time.localeCompare(b.r.time));
+  if(!items.length){container.innerHTML='<div class="empty-state reminder-empty"><span>⏰</span><div><strong>No reminders yet</strong><p>Add a reminder to a habit and allow notifications when you are ready.</p></div><button class="btn btn-secondary btn-small" type="button" data-empty-add-reminder>+ Add Reminder</button></div>';container.querySelector('[data-empty-add-reminder]')?.addEventListener('click',openAddReminderModal);return}
+  container.innerHTML=items.map(({r,h})=>`<div class="reminder-item reminder-timeline-item"><span class="reminder-time">${formatTime12(r.time)}</span><span class="reminder-timeline-dot"></span><span class="habit-icon">${h.icon}</span><div class="reminder-name-wrap"><span class="reminder-name">${escapeHtml(h.name)}</span><small>${soundLabel(r.sound)} · ${repeatLabel(h)}</small></div><button class="btn-icon-sm reminder-edit-btn" data-edit-reminder="${r.id}" aria-label="Edit reminder">✎</button></div>`).join('');
+  container.querySelectorAll('[data-edit-reminder]').forEach(b=>b.addEventListener('click',()=>openEditReminderModal(b.dataset.editReminder)));
 }
 
 function formatTime12(t){
@@ -668,7 +676,9 @@ function renderHabitsManage(){
       const habit = state.habits.find(h=>h.id===el.dataset.delete);
       showConfirm('Delete habit?', `"${habit.name}" and its historical records will be removed. This cannot be undone.`, ()=>{
         state.habits = state.habits.filter(h=>h.id!==habit.id);
+        state.reminders = state.reminders.filter(r=>r.habitId!==habit.id);
         saveHabits();
+        saveReminders();
         renderHabitsManage();
         showToast('Habit deleted');
       });
@@ -760,6 +770,7 @@ function handleHabitFormSubmit(e){
   const type = document.querySelector('input[name="habitType"]:checked').value;
   const frequency = document.querySelector('input[name="habitFrequency"]:checked').value;
   const reminder = document.getElementById('habitReminder').value;
+  const reminderSound = reminder ? (state.habits.find(h=>h.id===state.editingHabitId)?.reminderSound || 'gentle') : 'gentle';
 
   if(!name){ showToast('Please enter a habit name'); return; }
 
@@ -789,16 +800,18 @@ function handleHabitFormSubmit(e){
 
   if(state.editingHabitId){
     const habit = state.habits.find(h=>h.id===state.editingHabitId);
-    Object.assign(habit, { name, icon, category, type, target, unit, items, frequency, days, reminder, step: habit.step || step });
+    Object.assign(habit, { name, icon, category, type, target, unit, items, frequency, days, reminder, reminderSound, step: habit.step || step });
     if(type === 'quantity') habit.step = step;
     showToast('Habit updated');
   } else {
     state.habits.push({
       id: uid('h'), name, icon, category, type, target, unit, items,
-      frequency, days, reminder, enabled:true, createdAt: todayStr(), step
+      frequency, days, reminder, reminderSound, enabled:true, createdAt: todayStr(), step
     });
     showToast('Habit created');
   }
+  const savedHabit = state.habits.find(h=>h.id===state.editingHabitId) || state.habits[state.habits.length-1];
+  if(savedHabit) syncHabitReminder(savedHabit);
   saveHabits();
   closeHabitModal();
   renderCurrentView();
@@ -1154,20 +1167,29 @@ function handleGoalFormSubmit(e){
 /* -------------------------------- ACHIEVEMENTS -------------------------------- */
 
 function renderAchievements(){
-  checkAchievements();
-  const grid = document.getElementById('achievementsGrid');
-  grid.innerHTML = ACHIEVEMENT_DEFS.map(def=>{
-    const unlocked = state.achievementsUnlocked[def.id];
-    return `<div class="card achievement-card ${unlocked?'':'locked'}">
-      <span class="ach-icon">${def.icon}</span>
-      <div>
-        <div class="ach-title">${def.title}</div>
-        <div class="ach-desc">${def.desc}</div>
-        ${unlocked ? `<div class="ach-desc" style="color:var(--success); margin-top:4px;">Unlocked ${formatShortDate(unlocked)}</div>` : ''}
-      </div>
-    </div>`;
-  }).join('');
+  checkAchievements(); const grid=document.getElementById('achievementsGrid');if(!grid)return;
+  const unlockedCount=ACHIEVEMENT_DEFS.filter(d=>state.achievementsUnlocked[d.id]).length;const summary=document.getElementById('achievementSummary');if(summary)summary.textContent=`${unlockedCount} / ${ACHIEVEMENT_DEFS.length} unlocked`;
+  const next=ACHIEVEMENT_DEFS.filter(d=>!state.achievementsUnlocked[d.id]).sort((a,b)=>(b.getProgress?.()||0)/b.target-(a.getProgress?.()||0)/a.target)[0];const feature=document.getElementById('achievementFeature');
+  if(feature){if(next){const p=Math.min(100,Math.round(((next.getProgress?.()||0)/next.target)*100));feature.innerHTML=`<div class="achievement-feature-card"><div class="achievement-feature-icon">${next.icon}</div><div class="achievement-feature-copy"><small>NEXT MILESTONE</small><strong>${escapeHtml(next.title)}</strong><p>${escapeHtml(next.desc)}</p><div class="achievement-feature-track"><span style="width:${p}%"></span></div><div class="achievement-feature-meta"><span>${Math.min(next.getProgress?.()||0,next.target)} / ${next.target}</span><span>${p}%</span></div></div></div>`}else feature.innerHTML='<div class="achievement-feature-card complete-feature"><div class="achievement-feature-icon">🏆</div><div><small>ALL UNLOCKED</small><strong>Habitly legend.</strong><p>You completed every current milestone.</p></div></div>'}
+  const filter=state.achievementFilter||'all';const defs=ACHIEVEMENT_DEFS.filter(d=>filter==='all'||d.category===filter);
+  grid.innerHTML=defs.map(def=>{const unlocked=!!state.achievementsUnlocked[def.id];const progress=Math.min(def.target,Number(def.getProgress?.()||0));const pct=Math.min(100,Math.round(progress/def.target*100));return `<article class="achievement-card-v2 ${unlocked?'unlocked':'locked'}"><div class="achievement-badge ${unlocked?'badge-unlocked':''}"><span>${unlocked?def.icon:'🔒'}</span></div><div class="achievement-card-body"><div class="achievement-card-top"><span class="achievement-category">${def.category}</span>${unlocked?'<span class="achievement-check">✓</span>':''}</div><h3>${escapeHtml(def.title)}</h3><p>${escapeHtml(def.desc)}</p><div class="achievement-progress-track"><span style="width:${pct}%"></span></div><div class="achievement-progress-meta"><span>${progress} / ${def.target}</span><span>${unlocked?'Unlocked':pct+'%'}</span></div></div></article>`}).join('');
 }
+
+/* ----------------------------- REMINDER MANAGER ----------------------------- */
+const REMINDER_SOUNDS={gentle:{freq:[660,880],dur:[.16,.22]},chime:{freq:[523.25,659.25,783.99],dur:[.12,.12,.24]},calm:{freq:[392,523.25],dur:[.25,.35]},classic:{freq:[880,660,880],dur:[.12,.12,.16]},simple:{freq:[660,660],dur:[.10,.18]}};
+let audioCtx=null;
+function playReminderSound(kind='gentle'){if(kind==='none')return;const spec=REMINDER_SOUNDS[kind]||REMINDER_SOUNDS.gentle;try{audioCtx=audioCtx||new(window.AudioContext||window.webkitAudioContext)();const start=audioCtx.currentTime+.02;let offset=0;spec.freq.forEach((freq,i)=>{const osc=audioCtx.createOscillator(),gain=audioCtx.createGain(),t=start+offset,d=spec.dur[i]||.16;osc.type='sine';osc.frequency.value=freq;gain.gain.setValueAtTime(.0001,t);gain.gain.exponentialRampToValueAtTime(.18,t+.02);gain.gain.exponentialRampToValueAtTime(.0001,t+d);osc.connect(gain).connect(audioCtx.destination);osc.start(t);osc.stop(t+d+.03);offset+=d+.035})}catch(e){console.warn('Reminder sound unavailable',e)}}
+function openAddReminderModal(){const habits=state.habits.filter(h=>h.enabled);if(!habits.length){showToast('Create a habit first');return}state.editingReminderId=null;document.getElementById('reminderModalTitle').textContent='Add Reminder';const select=document.getElementById('reminderHabit');select.innerHTML=habits.map(h=>`<option value="${h.id}">${h.icon} ${escapeHtml(h.name)}</option>`).join('');const first=habits[0],existing=getReminderByHabit(first.id);document.getElementById('reminderTime').value=existing?.time||first.reminder||'20:00';document.getElementById('reminderSound').value=existing?.sound||first.reminderSound||'gentle';document.getElementById('reminderModalOverlay').classList.add('open')}
+function openEditReminderModal(reminderId){const r=state.reminders.find(x=>x.id===reminderId);if(!r)return;const habits=state.habits.filter(h=>h.enabled);if(!habits.length)return;state.editingReminderId=reminderId;document.getElementById('reminderModalTitle').textContent='Edit Reminder';const select=document.getElementById('reminderHabit');select.innerHTML=habits.map(h=>`<option value="${h.id}">${h.icon} ${escapeHtml(h.name)}</option>`).join('');select.value=r.habitId;document.getElementById('reminderTime').value=r.time;document.getElementById('reminderSound').value=r.sound||'gentle';document.getElementById('reminderModalOverlay').classList.add('open')}
+function closeReminderModal(){document.getElementById('reminderModalOverlay').classList.remove('open');state.editingReminderId=null}
+function saveReminderFromForm(e){e.preventDefault();const habitId=document.getElementById('reminderHabit').value,time=document.getElementById('reminderTime').value,sound=document.getElementById('reminderSound').value,habit=state.habits.find(h=>h.id===habitId);if(!habit||!time)return;const duplicate=state.reminders.find(r=>r.habitId===habitId&&r.id!==state.editingReminderId);if(duplicate){duplicate.time=time;duplicate.sound=sound;duplicate.enabled=true}else if(state.editingReminderId){const r=state.reminders.find(x=>x.id===state.editingReminderId);if(r)Object.assign(r,{habitId,time,sound,enabled:true})}else state.reminders.push({id:uid('r'),habitId,time,sound,enabled:true});habit.reminder=time;habit.reminderSound=sound;saveHabits();saveReminders();closeReminderModal();renderDashboard();renderSettings();showToast('Reminder saved')}
+function deleteReminder(reminderId){const r=state.reminders.find(x=>x.id===reminderId);if(!r)return;const h=state.habits.find(x=>x.id===r.habitId);showConfirm('Delete reminder?',`Remove the reminder for ${h?.name||'this habit'}?`,()=>{state.reminders=state.reminders.filter(x=>x.id!==reminderId);if(h)h.reminder='';saveHabits();saveReminders();renderDashboard();renderSettings();showToast('Reminder deleted')})}
+function previewSelectedReminderSound(){playReminderSound(document.getElementById('reminderSound').value)}
+function getReminderSnoozes(){return lsGet('habitly_reminder_snoozes',{})}function setReminderSnooze(key,until){const d=getReminderSnoozes();d[key]=until;lsSet('habitly_reminder_snoozes',d)}
+function showReminderAlert(reminder){const h=state.habits.find(x=>x.id===reminder.habitId);if(!h)return;state.reminderAlert={reminder,h};document.getElementById('reminderAlertIcon').textContent=h.icon;document.getElementById('reminderAlertTitle').textContent=`Time for ${h.name}`;document.getElementById('reminderAlertMessage').textContent=`Your ${formatTime12(reminder.time)} reminder is due. Keep the momentum going.`;document.getElementById('reminderAlertOverlay').classList.add('open');document.getElementById('reminderAlertOverlay').setAttribute('aria-hidden','false');playReminderSound(reminder.sound)}
+function closeReminderAlert(){document.getElementById('reminderAlertOverlay').classList.remove('open');document.getElementById('reminderAlertOverlay').setAttribute('aria-hidden','true');state.reminderAlert=null}
+function completeAlertHabit(){const r=state.reminderAlert?.reminder;if(!r)return;const h=state.habits.find(x=>x.id===r.habitId);if(h){const rec=ensureRecord(todayStr(),h);if(h.type==='quantity')rec.value=h.target;if(h.type==='count')rec.items=(h.items||[]).map(()=>true);rec.completed=true;rec.completedAt=new Date().toISOString();saveRecords();checkAchievements();renderCurrentView()}closeReminderAlert();showToast('Habit marked complete ✓')}
+function snoozeAlert(){const r=state.reminderAlert?.reminder;if(!r)return;setReminderSnooze(`${todayStr()}|${r.id}|${r.time}`,Date.now()+10*60*1000);closeReminderAlert();showToast('Reminder snoozed for 10 minutes')}
 
 /* ------------------------------- PROFILE / WELCOME ------------------------------- */
 
@@ -1217,15 +1239,13 @@ async function saveProfile(name,email,shareRecords=state.profile?.shareRecords ?
 }
 
 function logoutLocalProfile(){
-  showConfirm('Log out of Habitly?', 'Your local profile and habit data will be removed from this browser. Your visitor record, if shared, remains in the admin registry.', ()=>{
-    Object.values(LS_KEYS).forEach(k=> localStorage.removeItem(k));
-    loadState();
-    applyTheme();
-    state.selectedDate = todayStr();
-    state.calendarYear = new Date().getFullYear();
-    state.calendarMonth = new Date().getMonth();
-    setView('dashboard');
+  showConfirm('Log out of Habitly?', 'You will return to the welcome page. Your habits and progress stay on this browser until you choose Reset All Data.', ()=>{
+    localStorage.removeItem(LS_KEYS.profile);
+    localStorage.removeItem('habitly_notified_reminders');
+    localStorage.removeItem('habitly_reminder_snoozes');
+    state.profile=null;
     updateProfileUI();
+    setView('dashboard');
     showWelcomeScreen();
     showToast('You have been logged out');
   });
@@ -1299,24 +1319,11 @@ function updateNotificationUI(){
 }
 
 function checkReminderNotifications(force=false){
-  if(!notificationSupported() || Notification.permission!=='granted') return;
-  const now=new Date();
-  const today=todayStr();
-  const currentMinutes=now.getHours()*60+now.getMinutes();
-  const notified=getNotifiedReminders();
-  state.habits.filter(h=>h.enabled && h.reminder && isHabitScheduledOnDate(h,today)).forEach(h=>{
-    const rec=getRecord(today,h.id);
-    if(rec && rec.completed) return;
-    const [hr,min]=h.reminder.split(':').map(Number);
-    const reminderMinutes=hr*60+min;
-    if(currentMinutes < reminderMinutes) return;
-    if(currentMinutes-reminderMinutes > 2 && !force) return;
-    const key=`${today}|${h.id}|${h.reminder}`;
-    if(notified[key]) return;
-    const n=new Notification(`${h.icon} ${h.name}`,{body:`It's time for your ${h.name} habit.`,tag:`habitly-${h.id}-${today}`,icon:'./favicon.svg'});
-    n.onclick=()=>{ window.focus(); setView('dashboard'); };
-    markReminderNotified(key);
-  });
+  const now=new Date(),today=todayStr(),currentMinutes=now.getHours()*60+now.getMinutes(),notified=getNotifiedReminders(),snoozes=getReminderSnoozes();
+  state.reminders.filter(r=>r.enabled!==false).forEach(r=>{const h=state.habits.find(x=>x.id===r.habitId);if(!h||!h.enabled||!isHabitScheduledOnDate(h,today))return;const rec=getRecord(today,h.id);if(rec&&rec.completed)return;const [hr,min]=r.time.split(':').map(Number),reminderMinutes=hr*60+min,key=`${today}|${r.id}|${r.time}`;if(snoozes[key]&&Date.now()<snoozes[key])return;if(currentMinutes<reminderMinutes)return;if(currentMinutes-reminderMinutes>2&&!force&&!snoozes[key])return;if(notified[key]&&!snoozes[key])return;
+    if(notificationSupported()&&Notification.permission==='granted'){const n=new Notification(`${h.icon} ${h.name}`,{body:`It's time for your ${h.name} habit.`,tag:`habitly-${r.id}-${today}`,icon:'./favicon.svg'});n.onclick=()=>{window.focus();setView('dashboard')}}
+    markReminderNotified(key);delete snoozes[key];lsSet('habitly_reminder_snoozes',snoozes);showReminderAlert(r)
+  })
 }
 
 function setupNotifications(){
@@ -1342,6 +1349,13 @@ function applyTheme(){
 function renderSettings(){
   updateProfileUI();
   updateNotificationUI();
+  renderSettingsReminders();
+}
+function renderSettingsReminders(){
+  const c=document.getElementById('settingsRemindersList');if(!c)return;const rows=state.reminders.map(r=>({r,h:state.habits.find(h=>h.id===r.habitId)})).filter(x=>x.h);
+  if(!rows.length){c.innerHTML='<div class="empty-state compact-empty"><span>⏰</span><div>No reminders configured.</div></div>';return}
+  c.innerHTML=rows.map(({r,h})=>`<div class="settings-reminder-row"><span class="habit-icon">${h.icon}</span><div class="settings-reminder-main"><strong>${escapeHtml(h.name)}</strong><span>${formatTime12(r.time)} · ${soundLabel(r.sound)}</span></div><button class="btn-icon-sm" data-edit-settings-reminder="${r.id}" aria-label="Edit reminder">✎</button><button class="btn-icon-sm danger-icon" data-delete-settings-reminder="${r.id}" aria-label="Delete reminder">×</button></div>`).join('');
+  c.querySelectorAll('[data-edit-settings-reminder]').forEach(b=>b.addEventListener('click',()=>openEditReminderModal(b.dataset.editSettingsReminder)));c.querySelectorAll('[data-delete-settings-reminder]').forEach(b=>b.addEventListener('click',()=>deleteReminder(b.dataset.deleteSettingsReminder)));
 }
 
 function setTheme(theme){
@@ -1359,6 +1373,7 @@ function exportData(){
     achievementsUnlocked: state.achievementsUnlocked,
     notes: state.notes,
     settings: state.settings,
+    reminders: state.reminders,
     profile: state.profile,
     exportedAt: new Date().toISOString(),
     version: 1
@@ -1390,7 +1405,9 @@ function importData(file){
         state.achievementsUnlocked = data.achievementsUnlocked || {};
         state.notes = data.notes || {};
         state.settings = data.settings || { theme:'dark' };
+        state.reminders = Array.isArray(data.reminders) ? data.reminders : [];
         state.profile = data.profile || null;
+        if(!state.reminders.length) state.reminders=state.habits.filter(h=>h.reminder).map(h=>({id:uid('r'),habitId:h.id,time:h.reminder,sound:h.reminderSound||'gentle',enabled:true}));
         persistAll();
         lsSet(LS_KEYS.seeded, true);
         applyTheme();
@@ -1408,6 +1425,7 @@ function importData(file){
 function resetAllData(){
   showConfirm('Reset all data?', 'Every habit, record, goal and note will be permanently deleted. This cannot be undone.', ()=>{
     Object.values(LS_KEYS).forEach(k=> localStorage.removeItem(k));
+    localStorage.removeItem('habitly_reminder_snoozes');
     loadState();
     applyTheme();
     state.selectedDate = todayStr();
@@ -1524,13 +1542,25 @@ function setupEventListeners(){
   });
   document.getElementById('resetDataBtn').addEventListener('click', resetAllData);
 
+  document.getElementById('openAddReminderBtn')?.addEventListener('click',openAddReminderModal);
+  document.getElementById('openAddReminderBtnSettings')?.addEventListener('click',openAddReminderModal);
+  document.getElementById('closeReminderModalBtn')?.addEventListener('click',closeReminderModal);
+  document.getElementById('cancelReminderBtn')?.addEventListener('click',closeReminderModal);
+  document.getElementById('reminderModalOverlay')?.addEventListener('click',e=>{if(e.target.id==='reminderModalOverlay')closeReminderModal()});
+  document.getElementById('reminderForm')?.addEventListener('submit',saveReminderFromForm);
+  document.getElementById('previewReminderSoundBtn')?.addEventListener('click',previewSelectedReminderSound);
+  document.getElementById('reminderHabit')?.addEventListener('change',()=>{const h=state.habits.find(x=>x.id===document.getElementById('reminderHabit').value),r=h&&getReminderByHabit(h.id);document.getElementById('reminderTime').value=r?.time||h?.reminder||'20:00';document.getElementById('reminderSound').value=r?.sound||h?.reminderSound||'gentle'});
+  document.getElementById('reminderSnoozeBtn')?.addEventListener('click',snoozeAlert);
+  document.getElementById('reminderCompleteBtn')?.addEventListener('click',completeAlertHabit);
+  document.getElementById('reminderAlertOverlay')?.addEventListener('click',e=>{if(e.target.id==='reminderAlertOverlay')closeReminderAlert()});
+  document.getElementById('achievementFilter')?.addEventListener('click',e=>{const b=e.target.closest('[data-ach-cat]');if(!b)return;document.querySelectorAll('#achievementFilter [data-ach-cat]').forEach(x=>x.classList.remove('active'));b.classList.add('active');state.achievementFilter=b.dataset.achCat;renderAchievements()});
   setupProfile();
   setupNotifications();
 
   // Escape key closes modals
   document.addEventListener('keydown', (e)=>{
     if(e.key === 'Escape'){
-      closeHabitModal(); closeGoalModal(); closeConfirm();
+      closeHabitModal(); closeGoalModal(); closeReminderModal(); closeConfirm(); closeReminderAlert();
     }
   });
 }

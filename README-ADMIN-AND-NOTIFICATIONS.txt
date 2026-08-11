@@ -1,14 +1,19 @@
-HABITLY BY PRK — WELCOME + PRIVATE ADMIN + REMINDER NOTIFICATIONS
+HABITLY BY PRK — WELCOME + PRIVATE ADMIN + REMINDERS + ACHIEVEMENTS
 
 WHAT THIS VERSION DOES
-1. First-use welcome page asks for name + email.
-2. The welcome page uses the premium colorful Habitly style.
+1. First-use welcome page asks only for name + email.
+2. Welcome design uses the approved black / light-grey premium theme with a simple mountain path visual.
 3. Dark mode is the default theme.
 4. The visitor-record checkbox starts checked, but the visitor can uncheck it. If unchecked, the profile is kept locally and is not sent to the visitor registry.
 5. Habit data and progress remain in LocalStorage.
 6. If Supabase is configured and the visitor-record checkbox is enabled, name/email are added to the small visitor registry.
 7. /admin.html provides a separate private admin login and visitor table.
-8. Reminder notifications can be enabled from Settings.
+8. Reminders can be added, edited and deleted from the dashboard or Settings.
+9. Reminders support built-in sound previews: Gentle Bell, Soft Chime, Calm, Classic, Simple and None.
+10. When Habitly is open, due reminders can show an in-app alert, play the selected sound and optionally show a browser notification.
+11. Reminders support a 10-minute snooze action.
+12. Achievements now include streaks, consistency and milestone collections with locked/unlocked progress.
+13. Statistics, progress bars, goals and dashboard cards use the upgraded visual system with restrained accent colors.
 
 YOUR ADMIN
 Admin email: prem.cybersecurity@gmail.com
@@ -42,17 +47,25 @@ IMPORTANT SECURITY
 - RLS policies in supabase-schema.sql prevent ordinary authenticated users from reading the visitor table.
 
 VISITOR RECORDS
-- Local profile: name + email + preference are stored in the visitor's browser.
+- Local profile: name + email + record-sharing preference are stored in the visitor's browser.
 - Remote registry: only name/email are sent when the visitor leaves the record-sharing checkbox enabled and Supabase is configured.
-- Habit history, goals, notes and other personal tracker data remain local.
+- Habit history, goals, notes, reminders and other personal tracker data remain local.
+- The admin visitor table does not expose users' private habit history.
 
 REMINDER NOTIFICATIONS
 - Open Habitly -> Settings -> Reminder Notifications -> Enable.
-- Allow browser notifications.
-- A notification appears when a scheduled reminder is due while Habitly is open.
-- This lightweight version does not guarantee notifications after the browser is completely closed. Reliable background push requires a push service/server.
+- Allow browser notifications if you want browser alerts.
+- A reminder can also show an in-app alert and play its selected sound while Habitly is open.
+- Browser notification APIs do not provide a reliable cross-browser way for this site to force a custom sound when the page is closed. Reliable background push requires a push service/server.
+
+DATA / LOGOUT
+- Log Out returns to the welcome page and clears only the local profile/session marker.
+- Habits and progress stay on the browser until the user chooses Reset All Data.
+- Reset All Data permanently removes the local Habitly data and returns to the welcome page.
+- The Supabase visitor record is not deleted by logout or local reset.
 
 NEW UI NOTES
 - Export, Import and Reset are highlighted as red action buttons.
-- Profile includes a Log Out action. In this local-only app, logging out clears the local profile and habit data from the current browser and returns to the welcome screen. It does not delete the visitor registry entry in Supabase.
-- Use admin.html for the real Supabase-protected admin area.
+- The sidebar contains Log Out; the dashboard date area contains the theme switch.
+- The H favicon is used for the browser tab.
+- Open Graph metadata/image is intentionally NOT included yet; it will be added as the final deployment/portfolio step.

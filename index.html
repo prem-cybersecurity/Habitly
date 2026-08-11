@@ -14,50 +14,52 @@
 
   <!-- Welcome Profile -->
   <div class="welcome-screen" id="welcomeScreen" aria-hidden="true">
-    <div class="welcome-orb welcome-orb-blue"></div>
-    <div class="welcome-orb welcome-orb-pink"></div>
     <div class="welcome-card">
-      <div class="welcome-topline">
-        <div class="welcome-brand-mark">H</div>
-        <div>
-          <div class="welcome-brand">HABITLY <span>BY PRK</span></div>
-          <div class="welcome-brand-sub">PERSONAL HABBIT TRACKER</div>
+      <div class="welcome-visual-panel">
+        <div class="welcome-topline">
+          <div class="welcome-brand-mark">H</div>
+          <div class="welcome-brand">HABITLY BY PRK</div>
+        </div>
+        <div class="welcome-mountain-art" aria-hidden="true">
+          <div class="mountain-glow"></div>
+          <div class="mountain mountain-back"></div>
+          <div class="mountain mountain-mid"></div>
+          <div class="mountain mountain-front"></div>
+          <div class="mountain-flag">⚑</div>
+          <div class="mountain-path"></div>
+          <span class="mountain-dot dot-1"></span><span class="mountain-dot dot-2"></span>
+          <span class="mountain-dot dot-3"></span><span class="mountain-dot dot-4"></span>
+          <span class="mountain-dot dot-5"></span><span class="mountain-dot dot-6"></span>
+        </div>
+        <div class="welcome-copy-block">
+          <h1>Every step today<br>builds your<br>better tomorrow.</h1>
+          <span class="welcome-copy-line"></span>
+          <p>Small habits.<br>Big changes.<br>You've got this!</p>
         </div>
       </div>
-
-      <div class="welcome-main">
-        <div class="welcome-visual" aria-hidden="true">
-          <div class="welcome-visual-ring"></div>
-          <span class="welcome-emoji welcome-emoji-water">💧</span>
-          <span class="welcome-emoji welcome-emoji-fire">🔥</span>
-          <span class="welcome-emoji welcome-emoji-check">✓</span>
-          <span class="welcome-emoji welcome-emoji-spark">✦</span>
+      <div class="welcome-form-panel">
+        <div class="welcome-form-head">
+          <p class="welcome-eyebrow">PERSONAL HABIT TRACKER</p>
+          <h2>Welcome to Habitly</h2>
+          <p>Let's get started with your profile.</p>
         </div>
-        <p class="welcome-eyebrow">WELCOME TO YOUR DAILY ROUTINE</p>
-        <h1>Build better days,<br><span>one habit at a time.</span></h1>
-        <p class="welcome-copy">Your name and email are used to personalize your Habitly dashboard and show your profile
-          information. If you allow record sharing, they may also be added to the private visitor registry.</p>
+        <form id="welcomeForm" class="welcome-form">
+          <label class="welcome-field">
+            <span>Your Name</span>
+            <div class="welcome-input-wrap"><span class="welcome-input-icon">♙</span><input id="welcomeName" type="text" placeholder="Enter your name" maxlength="50" autocomplete="name" required /></div>
+          </label>
+          <label class="welcome-field">
+            <span>Your Email</span>
+            <div class="welcome-input-wrap"><span class="welcome-input-icon">✉</span><input id="welcomeEmail" type="email" placeholder="Enter your email" maxlength="120" autocomplete="email" required /></div>
+          </label>
+          <label class="welcome-consent">
+            <input id="welcomeConsent" type="checkbox" checked />
+            <span>Allow Habitly to keep my name and email for records.</span>
+          </label>
+          <p class="welcome-consent-note">Used to personalize your dashboard and maintain visitor records when enabled.</p>
+          <button class="welcome-submit" type="submit">Continue <span>→</span></button>
+        </form>
       </div>
-
-      <form id="welcomeForm" class="welcome-form">
-        <label class="welcome-field">
-          <span>Name</span>
-          <div class="welcome-input-wrap"><span class="welcome-input-icon">✦</span><input id="welcomeName" type="text"
-              placeholder="Prem Kumar" maxlength="50" autocomplete="name" required /></div>
-        </label>
-        <label class="welcome-field">
-          <span>Email</span>
-          <div class="welcome-input-wrap"><span class="welcome-input-icon">@</span><input id="welcomeEmail" type="email"
-              placeholder="you@example.com" maxlength="120" autocomplete="email" required /></div>
-        </label>
-        <label class="welcome-consent">
-          <input id="welcomeConsent" type="checkbox" checked />
-          <span>I agree to save my name and email for Habitly records and personalization.</span>
-        </label>
-        <button class="welcome-submit" type="submit">Enter Habitly <span>→</span></button>
-      </form>
-      <p class="welcome-note">Your habits and progress stay on this browser. Your name and email are used for dashboard
-        personalization; visitor records are shared only when the checkbox above is enabled.</p>
     </div>
   </div>
 
@@ -177,10 +179,25 @@
         </div>
 
         <div class="section-block">
-          <h2>Upcoming Reminders</h2>
-          <p class="subtle reminder-help">Set a reminder for any habit in <strong>Habits</strong>, then allow
-            <strong>Reminder Notifications</strong> in Settings to receive a browser alert when it is due.</p>
+          <div class="section-block-header reminder-section-head">
+            <div>
+              <h2>Upcoming Reminders</h2>
+              <p class="subtle reminder-help">Add a reminder to a habit, then allow notifications for browser alerts.</p>
+            </div>
+            <button class="btn btn-secondary btn-small" id="openAddReminderBtn" type="button">+ Add Reminder</button>
+          </div>
           <div class="reminders-list" id="remindersList"></div>
+        </div>
+        <div class="section-block">
+          <div class="momentum-card card" id="momentumCard">
+            <div class="momentum-copy">
+              <div class="eyebrow-inline">TODAY'S MOMENTUM</div>
+              <h3 id="momentumTitle">Keep going.</h3>
+              <p id="momentumText">Small progress still counts.</p>
+            </div>
+            <div class="momentum-meter"><div class="momentum-fill" id="momentumFill"></div></div>
+            <div class="momentum-value" id="momentumValue">0%</div>
+          </div>
         </div>
 
         <div class="section-block">
@@ -313,12 +330,17 @@
 
       <!-- ---------- ACHIEVEMENTS ---------- -->
       <section class="view" id="view-achievements">
-        <header class="view-header">
-          <div>
-            <h1>Achievements</h1>
-            <p class="subtle">Milestones you've unlocked along the way.</p>
-          </div>
+        <header class="view-header achievements-header">
+          <div><p class="eyebrow-inline">YOUR MILESTONES</p><h1>Achievements</h1><p class="subtle">Small wins become lasting consistency.</p></div>
+          <div class="achievement-summary" id="achievementSummary">0 / 0 unlocked</div>
         </header>
+        <div class="achievement-feature" id="achievementFeature"></div>
+        <div class="achievement-filter" id="achievementFilter">
+          <button class="chip active" data-ach-cat="all">All</button>
+          <button class="chip" data-ach-cat="Streaks">🔥 Streaks</button>
+          <button class="chip" data-ach-cat="Consistency">✨ Consistency</button>
+          <button class="chip" data-ach-cat="Milestones">🏆 Milestones</button>
+        </div>
         <div class="achievements-grid" id="achievementsGrid"></div>
       </section>
 
@@ -351,11 +373,15 @@
           <div class="card settings-row notification-settings-row">
             <div>
               <strong>Reminder Notifications</strong>
-              <p class="subtle" id="notificationStatus">Allow Habitly to notify you when a scheduled reminder is due.
-              </p>
+              <p class="subtle" id="notificationStatus">Allow Habitly to notify you when a scheduled reminder is due.</p>
             </div>
             <button class="btn btn-secondary" id="enableNotificationsBtn">Enable</button>
           </div>
+          <div class="reminder-manager-head">
+            <div><strong>Your Reminders</strong><p class="subtle">Choose a time and a gentle sound for each habit.</p></div>
+            <button class="btn btn-secondary btn-small" id="openAddReminderBtnSettings" type="button">+ Add Reminder</button>
+          </div>
+          <div class="settings-reminders-list" id="settingsRemindersList"></div>
         </div>
 
         <div class="section-block">
@@ -496,6 +522,22 @@
     </div>
   </div>
 
+  <!-- Reminder modal -->
+  <div class="modal-overlay" id="reminderModalOverlay">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="reminderModalTitle">
+      <div class="modal-header"><h3 id="reminderModalTitle">Add Reminder</h3><button class="icon-btn" id="closeReminderModalBtn" aria-label="Close">✕</button></div>
+      <form id="reminderForm" class="modal-body">
+        <label class="field"><span>Habit</span><select id="reminderHabit" required></select></label>
+        <div class="field-row">
+          <label class="field"><span>Time</span><input type="time" id="reminderTime" required /></label>
+          <label class="field"><span>Sound</span><select id="reminderSound"><option value="gentle">🔔 Gentle Bell</option><option value="chime">✨ Soft Chime</option><option value="calm">🌊 Calm</option><option value="classic">⏰ Classic</option><option value="simple">🎵 Simple</option><option value="none">🔇 None</option></select></label>
+        </div>
+        <div class="sound-preview-row"><span class="subtle">Repeat follows this habit's schedule.</span><button type="button" class="btn btn-secondary btn-small" id="previewReminderSoundBtn">▶ Preview</button></div>
+        <div class="modal-actions"><button type="button" class="btn btn-secondary" id="cancelReminderBtn">Cancel</button><button type="submit" class="btn btn-primary">Save Reminder</button></div>
+      </form>
+    </div>
+  </div>
+
   <!-- Add eddit Goal modal-->
   <div class="modal-overlay" id="goalModalOverlay">
     <div class="modal" role="dialog" aria-modal="true" aria-labelledby="goalModalTitle">
@@ -543,6 +585,16 @@
   </div>
 
   
+  <div class="reminder-alert-overlay" id="reminderAlertOverlay" aria-hidden="true">
+    <div class="reminder-alert-card">
+      <span class="reminder-alert-icon" id="reminderAlertIcon">🔔</span>
+      <p class="eyebrow-inline">HABITLY REMINDER</p>
+      <h3 id="reminderAlertTitle">It's time.</h3>
+      <p id="reminderAlertMessage">Your habit reminder is due.</p>
+      <div class="reminder-alert-actions"><button class="btn btn-secondary" id="reminderSnoozeBtn">Snooze 10m</button><button class="btn btn-primary" id="reminderCompleteBtn">Mark Complete</button></div>
+    </div>
+  </div>
+
   <div class="toast" id="toast"></div>
 
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
