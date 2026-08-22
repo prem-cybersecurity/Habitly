@@ -3,15 +3,14 @@
   "short_name": "Habitly",
   "start_url": "./",
   "display": "standalone",
-  "background_color": "#080808",
-  "theme_color": "#080808",
+  "background_color": "#ffffff",
+  "theme_color": "#6d28d9",
   "description": "A simple, focused personal habit tracker.",
   "icons": [
-    {
-      "src": "favicon.svg",
-      "sizes": "any",
-      "type": "image/svg+xml",
-      "purpose": "any maskable"
-    }
-  ]
+  {
+    "src": "assets/Fav Icon Habitly.png",
+    "sizes": "512x512",
+    "type": "image/png"
+  }
+]
 }

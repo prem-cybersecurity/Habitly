@@ -1,0 +1,24 @@
+/* Authentication gate: V1's original application styles are not modified. */
+#auth-gate{
+  position:fixed;
+  inset:0;
+  z-index:99999;
+  background:#fff;
+  opacity:1;
+  visibility:visible;
+  transition:opacity .18s ease,visibility .18s ease;
+}
+#auth-gate.is-hidden{
+  opacity:0;
+  visibility:hidden;
+  pointer-events:none;
+}
+#auth-gate iframe{
+  display:block;
+  width:100%;
+  height:100%;
+  border:0;
+  background:#fff;
+}
+body.auth-gate-active{overflow:hidden}
+@media (prefers-reduced-motion:reduce){#auth-gate{transition:none}}

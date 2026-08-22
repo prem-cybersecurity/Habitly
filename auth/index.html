@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Habitly authentication flow demo">
+  <title>Habitly — Authentication</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="auth-shell" id="app">
+    <section class="visual-panel" aria-label="Habitly introduction">
+      <div class="visual-overlay">
+        <div class="brand" aria-label="Habitly">
+          <img src="assets/habitly-logo.png" alt="Habitly" class="brand-logo">
+          <span class="brand-name">Habitly</span>
+        </div>
+        <div class="visual-copy">
+          <p>PERSONAL HABIT TRACKER</p>
+          <h2>Build habits.<br><span>Change life.</span></h2>
+          <span>Small habits today create meaningful<br>changes tomorrow.</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="form-panel" aria-label="Authentication">
+      <div class="form-wrap" id="view" tabindex="-1"></div>
+    </section>
+  </main>
+
+  <div class="sr-only" id="status" aria-live="polite"></div>
+  <script src="app.js"></script>
+</body>
+</html>

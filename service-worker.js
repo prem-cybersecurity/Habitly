@@ -1,7 +1,18 @@
-const CACHE_NAME = 'habitly-shell-v5';
+const CACHE_NAME = 'habitly-v2-shell-v1';
 const APP_SHELL = [
-  './', './index.html', './style.css', './script.js', './favicon.svg', './manifest.webmanifest',
-  './admin.html', './admin.css', './admin.js', './config.js'
+  './',
+  './index.html',
+  './styles.css',
+  './app.js',
+  './config.js',
+  './manifest.webmanifest',
+  './admin.html',
+  './admin.css',
+  './admin.js',
+  './og-image.png',
+  './assets/Fav Icon Habitly.png',
+  './assets/Habitly Leaf Transparent.png',
+  './assets/Habitly Leaf White.png'
 ];
 
 self.addEventListener('install', event => {
