@@ -75,7 +75,7 @@ function ensurehabitlyAuth() {
 }
 
 function getRedirectUrl() {
-    return `${window.location.origin}/index.html`;
+    return `${window.top.location.origin}/index.html`;
 }
 
 function icon(type) {
@@ -723,46 +723,85 @@ document.addEventListener("click", async event => {
         return;
     }
 
-    /* =====================================================
-       GOOGLE OAUTH
-    ===================================================== */
+/* =====================================================
+   GOOGLE OAUTH
+===================================================== */
 
-    const google = event.target.closest("[data-google]");
+const google = event.target.closest("[data-google]");
 
-    if (google) {
+if (google) {
 
-        if (!ensurehabitlyAuth()) return;
+    event.preventDefault();
 
-        google.disabled = true;
+    if (!ensurehabitlyAuth()) return;
 
-        const { error } =
-            await habitlyAuth.auth.signInWithOAuth({
-                provider: "google",
+    google.disabled = true;
 
-                options: {
-                    redirectTo: getRedirectUrl()
-                }
-            });
+    const redirectUrl =
+        `${window.top.location.origin}/index.html`;
 
-        if (error) {
+    console.log(
+        "Habitly Google OAuth redirect:",
+        redirectUrl
+    );
 
-            console.error(error);
+    const { data, error } =
+        await habitlyAuth.auth.signInWithOAuth({
+            provider: "google",
 
-            setStatus(
-                "login-status",
-                error.message
-            );
+            options: {
+                redirectTo: redirectUrl,
+                skipBrowserRedirect: true
+            }
+        });
 
-            setStatus(
-                "signup-status",
-                error.message
-            );
+    if (error) {
 
-            google.disabled = false;
-        }
+        console.error(
+            "Habitly Google OAuth error:",
+            error
+        );
+
+        setStatus(
+            "login-status",
+            error.message
+        );
+
+        setStatus(
+            "signup-status",
+            error.message
+        );
+
+        google.disabled = false;
 
         return;
     }
+
+    if (!data?.url) {
+
+        console.error(
+            "Habitly Google OAuth did not return a URL."
+        );
+
+        setStatus(
+            "login-status",
+            "Unable to start Google sign-in."
+        );
+
+        google.disabled = false;
+
+        return;
+    }
+
+    /*
+      The authentication page is inside an iframe.
+      Navigate the TOP window so Google OAuth is not
+      trapped inside the authentication iframe.
+    */
+    window.top.location.assign(data.url);
+
+    return;
+}
 
     /* =====================================================
        RESEND CONFIRMATION
