@@ -1,46 +1,86 @@
 (function(){
-  const SESSION_KEY='habitly.auth.session';
-  const gate=document.getElementById('auth-gate');
-  if(!gate)return;
-  const iframe=gate.querySelector('iframe');
-  const app=document.getElementById('app');
+  'use strict';
 
-  function hasSession(){
-    try{
-      const s=JSON.parse(localStorage.getItem(SESSION_KEY)||'null');
-      return !!(s&&s.loggedIn&&s.email);
-    }catch{return false;}
+  const gate = document.getElementById('auth-gate');
+  if (!gate) return;
+
+  const iframe = gate.querySelector('iframe');
+  const app = document.getElementById('app');
+  const sb = window.habitlySupabase;
+
+  function setGate(open) {
+    gate.classList.toggle('is-hidden', !open);
+    document.body.classList.toggle('auth-gate-active', open);
+    if (app) app.setAttribute('aria-hidden', open ? 'true' : 'false');
   }
-  function setGate(open){
-    gate.classList.toggle('is-hidden',!open);
-    document.body.classList.toggle('auth-gate-active',open);
-    if(app)app.setAttribute('aria-hidden',open?'true':'false');
-  }
-  function goDashboard(){
+
+  function goDashboard() {
     setGate(false);
-    if(location.hash!=='#/dashboard') location.hash='/dashboard';
+    if (location.hash !== '#/dashboard') {
+      location.hash = '/dashboard';
+    }
   }
 
-  // Make Login the visible starting page for an unauthenticated browser session.
-  if(!hasSession()){
-    if(location.hash!=='#/login') history.replaceState(null,'','#/login');
+  function goLogin() {
     setGate(true);
-  }else{
-    if(location.hash==='#/login'||!location.hash) history.replaceState(null,'','#/dashboard');
-    setGate(false);
+    if (location.hash !== '#/login') {
+      history.replaceState(null, '', '#/login');
+    }
   }
 
-  window.addEventListener('message',function(event){
-    const iframe=document.querySelector('#auth-gate iframe');
-    if(event.source!==iframe.contentWindow)return;
-    const data=event.data||{};
-    if(data.source!=='habitly-auth')return;
-    if(data.type==='AUTH_SUCCESS') goDashboard();
-  });
+  async function syncAuthState() {
+    if (!sb) {
+      console.error('Habitly Supabase client was not initialized.');
+      goLogin();
+      return;
+    }
 
-  window.addEventListener('storage',function(event){
-    if(event.key!==SESSION_KEY)return;
-    if(hasSession())goDashboard();
-    else setGate(true);
+    const { data, error } = await sb.auth.getSession();
+
+    if (error) {
+      console.error('Could not read Habitly authentication session:', error);
+      goLogin();
+      return;
+    }
+
+    if (data.session?.user) {
+      if (location.hash === '#/login' || !location.hash) {
+        history.replaceState(null, '', '#/dashboard');
+      }
+      setGate(false);
+    } else {
+      goLogin();
+    }
+  }
+
+  // Supabase is now the source of truth. The old
+  // habitly.auth.session localStorage demo session is no longer used.
+  try {
+    localStorage.removeItem('habitly.auth.session');
+  } catch (_) {}
+
+  // Make Login the visible starting page until Supabase confirms a session.
+  setGate(true);
+  syncAuthState();
+
+  if (sb) {
+    sb.auth.onAuthStateChange((event, session) => {
+      if (session?.user) {
+        goDashboard();
+      } else if (event === 'SIGNED_OUT' || event === 'INITIAL_SESSION') {
+        goLogin();
+      }
+    });
+  }
+
+  window.addEventListener('message', function(event) {
+    if (!iframe || event.source !== iframe.contentWindow) return;
+
+    const data = event.data || {};
+    if (data.source !== 'habitly-auth') return;
+
+    if (data.type === 'AUTH_SUCCESS') {
+      goDashboard();
+    }
   });
 })();

@@ -215,6 +215,7 @@ h1 .accent { color: var(--purple); }
   border-radius: 8px;
 }
 .password-toggle:hover { background: #f6f1ff; color: var(--purple); }
+.password-eye { width: 19px; height: 19px; display: block; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 
 .error {
   color: #b51f4c;

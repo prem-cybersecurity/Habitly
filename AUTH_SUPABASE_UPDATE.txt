@@ -1,0 +1,18 @@
+Habitly — Supabase Authentication Update
+
+Changes made:
+1. Unified the authentication client around window.habitlySupabase.
+2. Added window.habitlyAuth as a compatibility alias for auth/app.js.
+3. Replaced the old localStorage demo-session gate with Supabase Auth session checking.
+4. Added Supabase Auth state listening so login/logout/session expiry updates the gate.
+5. Changed the main app logout to call Supabase auth.signOut().
+6. Bumped the service-worker cache version to prevent the previous shell from remaining cached.
+7. Updated the auth page description from demo authentication to secure authentication.
+
+Supabase dashboard requirements:
+- Authentication > Sign In / Providers: Email enabled.
+- Confirm email: ON if email verification is required.
+- Google provider: enable/configure it before using Continue with Google.
+- Authentication > URL Configuration: add the local and deployed redirect URLs used by Habitly.
+
+No Supabase service-role/secret key was added to the browser code.

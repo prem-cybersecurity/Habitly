@@ -1,16 +1,15 @@
 {
   "name": "Habitly by PRK",
   "short_name": "Habitly",
-  "start_url": "./",
+  "start_url": "./index.html#/dashboard",
+  "scope": "./",
   "display": "standalone",
   "background_color": "#ffffff",
   "theme_color": "#6d28d9",
-  "description": "A simple, focused personal habit tracker.",
+  "description": "Build better habits, track goals and keep your progress in one place.",
+  "orientation": "portrait-primary",
   "icons": [
-  {
-    "src": "assets/Fav Icon Habitly.png",
-    "sizes": "512x512",
-    "type": "image/png"
-  }
-]
+    {"src":"assets/habitly-icon-192.png","sizes":"192x192","type":"image/png","purpose":"any"},
+    {"src":"assets/habitly-icon-512.png","sizes":"512x512","type":"image/png","purpose":"any maskable"}
+  ]
 }
