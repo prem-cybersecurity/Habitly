@@ -1,0 +1,24 @@
+Habitly Drive Sync Update
+
+This version keeps the existing Habitly architecture:
+- localStorage remains the fast local working copy.
+- Google Drive remains the persistent backup/sync copy for users who selected Drive or This device + Google Drive.
+- Supabase is still used for authentication/storage-choice metadata; Habitly application data is not moved into Supabase.
+
+Changes:
+1. After a meaningful Habitly save, Drive backup is queued and uploaded automatically when Drive storage is selected and automatic backup is enabled.
+2. Rapid changes are debounced so multiple quick edits produce one Drive update instead of many uploads.
+3. Drive access-token expiry is tracked and a fresh token is requested when needed.
+4. Concurrent Drive token requests are single-flight to prevent duplicate Google authorization requests.
+5. Drive uploads use skipDrive internally so an upload cannot recursively trigger another upload.
+6. On login, Drive-selected users automatically load Habitly_Backup.json from Google Drive before continuing with the restored state.
+7. If a Drive-selected user has no backup file yet, the current state is uploaded to create the initial backup.
+8. Existing local data is preserved as a fallback if Drive cannot be loaded.
+9. Existing Google Drive folder/file metadata is reused when available.
+10. The Drive settings text now describes automatic backup after changes, not only a daily backup.
+11. Sunday is the default week-start preference.
+
+Important:
+- Google access tokens are browser-session credentials and are not stored in the backup JSON.
+- A different browser/device may need Google Drive authorization once before it can access the user's Drive backup. The storage choice itself remains associated with the authenticated Habitly account.
+- This is backup-based cross-browser synchronization, not a real-time multi-device database.

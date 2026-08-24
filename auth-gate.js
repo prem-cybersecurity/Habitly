@@ -26,6 +26,9 @@
     if (location.hash !== '#/login') {
       history.replaceState(null, '', '#/login');
     }
+    try {
+      iframe?.contentWindow?.postMessage({ source: 'habitly-gate', type: 'AUTH_ROUTE', route: 'login' }, '*');
+    } catch (_) {}
   }
 
   async function syncAuthState() {
@@ -66,7 +69,7 @@
   if (sb) {
     sb.auth.onAuthStateChange((event, session) => {
       if (session?.user) {
-        goDashboard();
+        if (event === 'SIGNED_IN' || event === 'INITIAL_SESSION') goDashboard();
       } else if (event === 'SIGNED_OUT' || event === 'INITIAL_SESSION') {
         goLogin();
       }
@@ -80,7 +83,8 @@
     if (data.source !== 'habitly-auth') return;
 
     if (data.type === 'AUTH_SUCCESS') {
-      goDashboard();
+      // Supabase auth state is authoritative; avoid a second redirect from the iframe.
+      if (sb) syncAuthState();
     }
   });
 })();

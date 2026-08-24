@@ -1,4 +1,4 @@
-const CACHE_NAME = 'habitly-v3-shell-v1';
+const CACHE_NAME = 'habitly-v4-shell-v1';
 const APP_SHELL = [
   './',
   './index.html',
