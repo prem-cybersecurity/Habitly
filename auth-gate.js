@@ -7,6 +7,8 @@
   const iframe = gate.querySelector('iframe');
   const app = document.getElementById('app');
   const sb = window.habitlySupabase;
+  let iframeReady = false;
+  let pendingRoute = null;
 
   function setGate(open) {
     gate.classList.toggle('is-hidden', !open);
@@ -21,14 +23,25 @@
     }
   }
 
+  function sendAuthRoute(route) {
+    pendingRoute = route;
+    if (!iframeReady || !iframe?.contentWindow) return;
+    try {
+      iframe.contentWindow.postMessage({
+        source: 'habitly-gate',
+        type: 'AUTH_ROUTE',
+        route
+      }, '*');
+      pendingRoute = null;
+    } catch (_) {}
+  }
+
   function goLogin() {
     setGate(true);
     if (location.hash !== '#/login') {
       history.replaceState(null, '', '#/login');
     }
-    try {
-      iframe?.contentWindow?.postMessage({ source: 'habitly-gate', type: 'AUTH_ROUTE', route: 'login' }, '*');
-    } catch (_) {}
+    sendAuthRoute('login');
   }
 
   async function syncAuthState() {
@@ -56,6 +69,15 @@
     }
   }
 
+  // The iframe can finish loading after goLogin() runs. Replay the
+  // requested route as soon as its auth UI is actually ready.
+  if (iframe) {
+    iframe.addEventListener('load', () => {
+      iframeReady = true;
+      if (pendingRoute) sendAuthRoute(pendingRoute);
+    });
+  }
+
   // Supabase is now the source of truth. The old
   // habitly.auth.session localStorage demo session is no longer used.
   try {
@@ -81,6 +103,12 @@
 
     const data = event.data || {};
     if (data.source !== 'habitly-auth') return;
+
+    if (data.type === 'AUTH_READY') {
+      iframeReady = true;
+      if (pendingRoute) sendAuthRoute(pendingRoute);
+      return;
+    }
 
     if (data.type === 'AUTH_SUCCESS') {
       // Supabase auth state is authoritative; avoid a second redirect from the iframe.
