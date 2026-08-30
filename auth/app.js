@@ -17,6 +17,8 @@ let state = {
     name: ""
 };
 
+let googleOAuthInFlight = false;
+
 function announce(message) {
     if (status) {
         status.textContent = message;
@@ -733,8 +735,9 @@ if (google) {
 
     event.preventDefault();
 
-    if (!ensurehabitlyAuth()) return;
+    if (!ensurehabitlyAuth() || googleOAuthInFlight) return;
 
+    googleOAuthInFlight = true;
     google.disabled = true;
 
     const redirectUrl =
@@ -772,6 +775,7 @@ if (google) {
             error.message
         );
 
+        googleOAuthInFlight = false;
         google.disabled = false;
 
         return;
@@ -788,6 +792,7 @@ if (google) {
             "Unable to start Google sign-in."
         );
 
+        googleOAuthInFlight = false;
         google.disabled = false;
 
         return;
@@ -942,11 +947,8 @@ document.addEventListener("submit", async event => {
         }
 
         state.email = emailValue;
-
-        notifyParent("AUTH_SUCCESS", {
-            email: emailValue
-        });
-
+        // Supabase emits SIGNED_IN; the parent auth gate is the sole owner of
+        // authenticated navigation. No second success message is necessary.
         return;
     }
 
@@ -1233,61 +1235,10 @@ document.addEventListener("submit", async event => {
 });
 
 /* =========================================================
-   habitlyAuth AUTH STATE
+   AUTH STATE
+   The parent auth gate owns the single Supabase auth listener. This iframe
+   only renders auth screens and reacts to explicit parent route messages.
 ========================================================= */
-
-if (habitlyAuth) {
-
-    habitlyAuth.auth.onAuthStateChange(
-        (event, session) => {
-
-            console.log(
-                "Habitly auth event:",
-                event
-            );
-
-            if (
-                event === "SIGNED_IN" &&
-                session?.user
-            ) {
-
-                const email =
-                    session.user.email || "";
-
-                state.email = email;
-
-                notifyParent(
-                    "AUTH_SUCCESS",
-                    {
-                        email
-                    }
-                );
-            }
-
-            if (
-                event === "PASSWORD_RECOVERY"
-            ) {
-
-                navigate("reset");
-            }
-
-            if (
-                event === "SIGNED_OUT"
-            ) {
-
-                console.log(
-                    "Habitly user signed out."
-                );
-            }
-        }
-    );
-
-} else {
-
-    console.error(
-        "habitlyAuth client unavailable. Check auth/index.html script order and config.js."
-    );
-}
 
 /* =========================================================
    HANDLE habitlyAuth REDIRECT
@@ -1327,15 +1278,8 @@ async function initializeAuth() {
     */
 
     if (session?.user) {
-
-        notifyParent(
-            "AUTH_SUCCESS",
-            {
-                email:
-                    session.user.email || ""
-            }
-        );
-
+        // The parent window already received INITIAL_SESSION/SIGNED_IN from
+        // Supabase. Do not emit a second success event from the iframe.
         return;
     }
 
@@ -1367,4 +1311,40 @@ window.addEventListener(
     }
 );
 
+/* =========================================================
+   PARENT (habitly-gate) ROUTE REQUESTS
+   ---------------------------------------------------------
+   The auth UI lives inside a persistent iframe: it is loaded
+   once and never reloaded on logout. auth-gate.js posts an
+   AUTH_ROUTE message whenever it needs this page to show a
+   specific view (most importantly, "login" right after a
+   logout). Without handling this message the iframe silently
+   keeps showing whatever view it last rendered (verify,
+   forgot, success, etc.), which is exactly why the login page
+   used to appear missing/incomplete until a hard reload.
+========================================================= */
+
+let authReadyNotified = false;
+
+function notifyAuthReady() {
+    if (authReadyNotified) return;
+    authReadyNotified = true;
+    notifyParent("AUTH_READY");
+}
+
+window.addEventListener("message", event => {
+    if (event.source !== window.parent) return;
+
+    const data = event.data || {};
+    if (data.source !== "habitly-gate") return;
+
+    if (data.type === "AUTH_ROUTE") {
+        // Always render a fresh view so no stale form, status
+        // message, or disabled button survives a logout.
+        state = { email: "", name: "" };
+        navigate(routes[data.route] ? data.route : "login");
+    }
+});
+
 initializeAuth();
+notifyAuthReady();

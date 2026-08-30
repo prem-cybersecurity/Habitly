@@ -90,11 +90,16 @@
 
   if (sb) {
     sb.auth.onAuthStateChange((event, session) => {
+      // This is the single parent-level auth listener. The main app consumes
+      // this event instead of registering another Supabase listener.
+      window.dispatchEvent(new CustomEvent('habitly-auth-state', { detail: { event, session } }));
       if (session?.user) {
         if (event === 'SIGNED_IN' || event === 'INITIAL_SESSION') goDashboard();
       } else if (event === 'SIGNED_OUT' || event === 'INITIAL_SESSION') {
         goLogin();
       }
+      // TOKEN_REFRESHED, USER_UPDATED and PASSWORD_RECOVERY never force a
+      // dashboard navigation here.
     });
   }
 
@@ -110,9 +115,5 @@
       return;
     }
 
-    if (data.type === 'AUTH_SUCCESS') {
-      // Supabase auth state is authoritative; avoid a second redirect from the iframe.
-      if (sb) syncAuthState();
-    }
   });
 })();

@@ -5,6 +5,7 @@ const AS = 'assets/';
 const ROUTES = ['dashboard', 'habits', 'goals', 'calendar', 'statistics', 'settings'];
 const STORAGE = 'habitly.final.v2';
 const USER_STORAGE_PREFIX = 'habitly.final.v3.user.';
+const STORAGE_OWNER_PREFIX = 'habitly.final.v3.owner.';
 let currentAuthUser = null;
 let currentStorageKey = '';
 // Google Drive OAuth: replace with your Google Cloud Web OAuth client ID.
@@ -14,41 +15,59 @@ let googleTokenClient = null;
 let googleAccessToken = '';
 let googleTokenExpiresAt = 0;
 let googleDriveBusy = false;
+let driveUploadQueued = false;
+// Explicit initialization phases: AUTH_INITIALIZING -> DRIVE_RESTORING -> READY.
+// While DRIVE_RESTORING, normal automatic Drive uploads stay blocked (see
+// driveStorageSelected/scheduleDriveBackup) and render() shows a small
+// restoring notice instead of flashing whatever state happens to be in
+// localStorage, which may be stale relative to the Drive backup being
+// downloaded.
+let appPhase = 'AUTH_INITIALIZING';
 let driveBackupTimer = null;
 let driveLoginSyncPending = false;
 let driveLoginSyncBusy = false; let driveLoginSyncedUserId = '';
+let driveLoginSyncRetryTimer = null;
+let driveLoginSyncRetryUsed = false;
+let driveLoginSyncWaitAttempts = 0;
 let driveTokenRequestPromise = null;
 let deferredInstallPrompt = null;
 let cropState = null;
 let pendingUndo = null;
 let storageOnboardingMode = '';
 let storageOnboardingBusy = false;
+let syncBaseState = null;
+let syncDirty = { habits: false, goals: false, events: false, reminders: false, profile: false, settings: false, activityHistory: false };
+let syncLastSavedSnapshot = null;
+let driveRemoteMissing = false;
+let driveLastKnownRemoteModifiedAt = '';
+let driveLastSyncCheckAt = 0;
+let driveSyncRetryTimer = null;
+let driveSyncRetryCount = 0;
+let syncGeneration = 0;
 
 const defaultState = {
   habits: [
-    { id: 'h1', name: 'Drink Water', emoji: '🥤', category: 'Health', target: 8, current: 6, unit: 'glasses', paused: false, created: 1, frequency: 'Daily' },
-    { id: 'h2', name: 'Read Book', emoji: '📖', category: 'Personal', target: 30, current: 20, unit: 'pages', paused: false, created: 2, frequency: 'Daily' },
-    { id: 'h3', name: 'Workout', emoji: '🏋️', category: 'Fitness', target: 30, current: 30, unit: 'min', paused: false, created: 3, frequency: 'Daily' },
-    { id: 'h4', name: 'Meditate', emoji: '🧘', category: 'Mindfulness', target: 15, current: 10, unit: 'min', paused: false, created: 4, frequency: 'Daily' },
+    { id: 'h1', name: 'Drink Water', emoji: '🥤', category: 'Health', target: 8, current: 0, unit: 'glasses', paused: false, created: 1, frequency: 'Daily' },
+    { id: 'h2', name: 'Read Book', emoji: '📖', category: 'Personal', target: 30, current: 0, unit: 'pages', paused: false, created: 2, frequency: 'Daily' },
+    { id: 'h3', name: 'Workout', emoji: '🏋️', category: 'Fitness', target: 30, current: 0, unit: 'min', paused: false, created: 3, frequency: 'Daily' },
+    { id: 'h4', name: 'Meditate', emoji: '🧘', category: 'Mindfulness', target: 15, current: 0, unit: 'min', paused: false, created: 4, frequency: 'Daily' },
     { id: 'h5', name: 'Practice Coding', emoji: '⌨️', category: 'Study', target: 60, current: 0, unit: 'min', paused: false, created: 5, frequency: 'Daily' }
   ],
   goals: [
-    { id: 'g1', title: 'Score 90% in Final Exams', emoji: '🎓', category: 'Education', target: 90, current: 65, unit: '%', date: '2026-12-30', status: 'active' },
-    { id: 'g2', title: 'Save ₹1,00,000', emoji: '💰', category: 'Finance', target: 100000, current: 45000, unit: '₹', date: '2027-01-31', status: 'active' },
-    { id: 'g3', title: 'Lose 8 kg', emoji: '🏋️', category: 'Health', target: 8, current: 5, unit: 'kg', date: '2026-11-15', status: 'active' },
-    { id: 'g4', title: 'Learn Data Structures', emoji: '📚', category: 'Learning', target: 100, current: 30, unit: '%', date: '2026-10-30', status: 'active' }
+    { id: 'g1', title: 'Score 90% in Final Exams', emoji: '🎓', category: 'Education', target: 90, current: 0, unit: '%', date: '2026-12-30', status: 'active' },
+    { id: 'g2', title: 'Save ₹1,00,000', emoji: '💰', category: 'Finance', target: 100000, current: 0, unit: '₹', date: '2027-01-31', status: 'active' },
+    { id: 'g3', title: 'Lose 8 kg', emoji: '🏋️', category: 'Health', target: 8, current: 0, unit: 'kg', date: '2026-11-15', status: 'active' },
+    { id: 'g4', title: 'Learn Data Structures', emoji: '📚', category: 'Learning', target: 100, current: 0, unit: '%', date: '2026-10-30', status: 'active' }
   ],
-  events: [
-    { id: 'e1', title: 'Team Meeting', date: '2026-08-21', time: '10:00 AM', emoji: '📅' },
-    { id: 'e2', title: 'Doctor Appointment', date: '2026-08-22', time: '4:00 PM', emoji: '🗓️' }
-  ],
+  events: [],
   reminders: [],
-  profile: { name: 'Prem Kumar', email: 'premkumar@example.com', avatar: '' },
+  profile: { name: '', email: '', avatar: '' },
   activityHistory: {},
+  syncMeta: { deleted: { habits: {}, goals: {}, events: {}, reminders: {} }, pending: { habits: false, goals: false, events: false, reminders: false, profile: false, settings: false, activityHistory: false } },
   settings: {
     notifications: { daily: true, motivational: true, weekly: true, goal: true },
     habits: { defaultView: 'All Habits', weekStarts: 'Sunday', autoComplete: true, keepStreak: true, quickQuantity: true },
-    drive: { connected: false, email: '', folderId: '', fileId: '', lastBackupDate: '', lastBackupAt: '', autoDaily: true },
+    drive: { connected: false, email: '', folderId: '', fileId: '', lastBackupDate: '', lastBackupAt: '', lastRemoteUpdatedAt: '', remoteEverSynced: false, syncRevision: 0, autoDaily: true },
     storage: { mode: 'local', setupCompleted: true }
   }
 };
@@ -65,6 +84,7 @@ function freshUserState(user) {
   fresh.events = [];
   fresh.reminders = [];
   fresh.activityHistory = {};
+  fresh.syncMeta = clone(defaultState.syncMeta);
   fresh.settings.storage = { mode: '', setupCompleted: false };
   fresh.profile = {
     name: user?.user_metadata?.full_name || user?.user_metadata?.name || (user?.email ? user.email.split('@')[0] : 'Habitly User'),
@@ -76,13 +96,40 @@ function freshUserState(user) {
 function loadStateForUser(user) {
   currentAuthUser = user || null;
   currentStorageKey = user?.id ? userStorageKey(user.id) : '';
+  if (!user?.id) return freshUserState(null);
   try {
-    const raw = currentStorageKey ? localStorage.getItem(currentStorageKey) : null;
-    return normalizeState(raw ? mergeState(JSON.parse(raw)) : freshUserState(user));
-  } catch (e) { return freshUserState(user); }
+    const raw = localStorage.getItem(currentStorageKey);
+    if (raw) return normalizeState(mergeState(JSON.parse(raw)));
+
+    // Legacy v2 was a single browser-wide key with no authenticated owner.
+    // Never silently assign it to an account unless the stored profile email
+    // proves it belongs to the current account. Otherwise leave it untouched
+    // for explicit manual recovery instead of risking cross-account leakage.
+    const legacyRaw = localStorage.getItem(STORAGE);
+    if (legacyRaw) {
+      try {
+        const legacy = JSON.parse(legacyRaw);
+        const legacyEmail = String(legacy?.profile?.email || '').trim().toLowerCase();
+        const accountEmail = String(user.email || '').trim().toLowerCase();
+        if (legacyEmail && accountEmail && legacyEmail === accountEmail) {
+          const migrated = normalizeState(mergeState(legacy));
+          localStorage.setItem(currentStorageKey, JSON.stringify(migrated));
+          localStorage.removeItem(STORAGE);
+          localStorage.setItem(STORAGE_OWNER_PREFIX + user.id, accountEmail);
+          return migrated;
+        }
+      } catch (_) {}
+    }
+    return freshUserState(user);
+  } catch (e) {
+    console.error('Habitly local state load failed:', e);
+    return freshUserState(user);
+  }
 }
+
 function loadState() { return loadStateForUser(currentAuthUser); }
 function mergeState(saved) {
+  if (!saved || typeof saved !== 'object' || Array.isArray(saved)) saved = {};
   const merged = {
     habits: Array.isArray(saved.habits) ? saved.habits : clone(defaultState.habits),
     goals: Array.isArray(saved.goals) ? saved.goals : [],
@@ -90,6 +137,7 @@ function mergeState(saved) {
     reminders: Array.isArray(saved.reminders) ? saved.reminders : [],
     profile: saved.profile ? { ...clone(defaultState.profile), ...saved.profile } : clone(defaultState.profile),
     activityHistory: saved.activityHistory && typeof saved.activityHistory === 'object' ? saved.activityHistory : {},
+    syncMeta: saved.syncMeta && typeof saved.syncMeta === 'object' ? { deleted: { habits: { ...(saved.syncMeta.deleted?.habits || {}) }, goals: { ...(saved.syncMeta.deleted?.goals || {}) }, events: { ...(saved.syncMeta.deleted?.events || {}) }, reminders: { ...(saved.syncMeta.deleted?.reminders || {}) } }, pending: { ...defaultState.syncMeta.pending, ...(saved.syncMeta.pending || {}) } } : clone(defaultState.syncMeta),
     settings: saved.settings ? {
       ...clone(defaultState.settings), ...saved.settings,
       notifications: { ...defaultState.settings.notifications, ...(saved.settings.notifications || {}) },
@@ -101,106 +149,221 @@ function mergeState(saved) {
   merged.reminders = merged.reminders.filter(r => r && r.source === 'manual');
   return merged;
 }
-function buildSnapshot(s, date) { return { date, habits: (s.habits || []).map(h => { const current = Math.max(0, Number((h.daily || {})[date] ?? (date === todayISO() ? h.current : 0)) || 0), target = Math.max(1, Number(h.target) || 1); return { id: h.id, name: h.name, emoji: h.emoji || '', category: h.category, paused: !!h.paused, target, unit: h.unit || '', current, percent: Math.min(100, Math.round(current / target * 100)) }; }) }; }
+function buildSnapshot(s, date) { return { date, habits: (s.habits || []).map(h => { const current = Math.max(0, Number((h.daily || {})[date] ?? 0) || 0), target = Math.max(1, Number(h.target) || 1); return { id: h.id, name: h.name, emoji: h.emoji || '', category: h.category, paused: !!h.paused, target, unit: h.unit || '', current, percent: Math.min(100, Math.round(current / target * 100)) }; }) }; }
 function captureActivitySnapshot(s, date) { s.activityHistory = s.activityHistory || {}; const snap = buildSnapshot(s, date); const meaningful = snap.habits.some(h => h.current > 0); if (meaningful || s.activityHistory[date]) s.activityHistory[date] = snap; }
 function normalizeState(s) {
+  const input = (s && typeof s === 'object' && !Array.isArray(s)) ? s : {};
+  const out = clone(input);
   const today = todayISO();
 
-  // Make sure every major state collection always exists.
-  s.habits = Array.isArray(s.habits)
-    ? s.habits
-    : clone(defaultState.habits);
+  out.habits = Array.isArray(out.habits) ? out.habits : clone(defaultState.habits);
+  out.goals = Array.isArray(out.goals) ? out.goals : [];
+  out.events = Array.isArray(out.events) ? out.events : [];
+  out.reminders = Array.isArray(out.reminders) ? out.reminders : [];
+  out.activityHistory = out.activityHistory && typeof out.activityHistory === 'object' && !Array.isArray(out.activityHistory) ? out.activityHistory : {};
+  out.profile = out.profile && typeof out.profile === 'object' ? { ...clone(defaultState.profile), ...out.profile } : clone(defaultState.profile);
+  out.syncMeta = out.syncMeta && typeof out.syncMeta === 'object' ? out.syncMeta : clone(defaultState.syncMeta);
+  out.syncMeta.deleted = out.syncMeta.deleted && typeof out.syncMeta.deleted === 'object' ? out.syncMeta.deleted : clone(defaultState.syncMeta.deleted);
+  for (const key of ['habits','goals','events','reminders']) out.syncMeta.deleted[key] = out.syncMeta.deleted[key] && typeof out.syncMeta.deleted[key] === 'object' ? out.syncMeta.deleted[key] : {};
+  out.syncMeta.pending = out.syncMeta.pending && typeof out.syncMeta.pending === 'object' ? { ...defaultState.syncMeta.pending, ...out.syncMeta.pending } : { ...defaultState.syncMeta.pending };
+  out.settings = out.settings && typeof out.settings === 'object' ? {
+    ...clone(defaultState.settings), ...out.settings,
+    notifications: { ...defaultState.settings.notifications, ...(out.settings.notifications || {}) },
+    habits: { ...defaultState.settings.habits, ...(out.settings.habits || {}) },
+    drive: { ...defaultState.settings.drive, ...(out.settings.drive || {}) },
+    storage: { ...defaultState.settings.storage, ...(out.settings.storage || {}) }
+  } : clone(defaultState.settings);
 
-  s.goals = Array.isArray(s.goals)
-    ? s.goals
-    : clone(defaultState.goals);
-
-  s.events = Array.isArray(s.events)
-    ? s.events
-    : clone(defaultState.events);
-
-  s.reminders = Array.isArray(s.reminders)
-    ? s.reminders
-    : [];
-
-  s.activityHistory =
-    s.activityHistory || {};
-
-  s.profile =
-    s.profile || clone(defaultState.profile);
-
-  s.settings =
-    s.settings || clone(defaultState.settings);
-
-  const hasHistory =
-    Object.keys(s.activityHistory).length > 0;
-
-  s.habits = s.habits.map(h => {
-    h.daily = {
-      ...(h.daily || {})
-    };
-
-    if (
-      !hasHistory &&
-      Object.keys(h.daily).length === 0 &&
-      Number(h.current) > 0
-    ) {
-      h.daily[today] = Math.min(
-        Number(h.current) || 0,
-        Math.max(
-          1,
-          Number(h.target) || 1
-        )
-      );
-    }
-
-    h.current = Math.max(
-      0,
-      Number(
-        h.daily[today] ?? 0
-      )
-    );
-
-    return h;
+  out.habits = out.habits.map(h => {
+    const habit = { ...h };
+    habit.daily = habit.daily && typeof habit.daily === 'object' && !Array.isArray(habit.daily) ? { ...habit.daily } : {};
+    habit.dailyUpdatedAt = habit.dailyUpdatedAt && typeof habit.dailyUpdatedAt === 'object' && !Array.isArray(habit.dailyUpdatedAt) ? { ...habit.dailyUpdatedAt } : {};
+    // current is a view of today's authoritative daily record. Historical
+    // current values are deliberately not carried into today.
+    const rawToday = habit.daily[today];
+    habit.current = Number.isFinite(Number(rawToday)) ? Math.max(0, Number(rawToday)) : 0;
+    if (Number.isFinite(Number(habit.target))) habit.target = Math.max(1, Number(habit.target));
+    return habit;
   });
 
-  const dates =
-    new Set(
-      Object.keys(s.activityHistory)
-    );
+  out.goals = out.goals.filter(Boolean).map(g => ({
+    ...g,
+    current: Math.max(0, Number(g.current) || 0),
+    target: Math.max(1, Number(g.target) || 1)
+  }));
+  out.events = out.events.filter(e => e && typeof e === 'object' && /^\d{4}-\d{2}-\d{2}$/.test(String(e.date || '')));
+  out.reminders = out.reminders.filter(r => r && typeof r === 'object' && r.source === 'manual' && /^([01]\d|2[0-3]):[0-5]\d$/.test(String(r.time || '')) && stateReminderHabitExists(out.habits, r.habitId));
 
-  s.habits.forEach(h => {
-    Object.keys(
-      h.daily || {}
-    ).forEach(d =>
-      dates.add(d)
-    );
-  });
-
-  dates.forEach(d =>
-    captureActivitySnapshot(
-      s,
-      d
-    )
-  );
-
-  captureActivitySnapshot(
-    s,
-    today
-  );
-
-  return s;
+  // History is observational data, never something normalization invents.
+  // Keep only structurally valid date keys and snapshots; do not manufacture
+  // a snapshot from a habit's current value.
+  const validHistory = {};
+  for (const [date, snap] of Object.entries(out.activityHistory)) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !snap || !Array.isArray(snap.habits)) continue;
+    validHistory[date] = { ...snap, date, habits: snap.habits.filter(Boolean).map(h => ({ ...h, current: Math.max(0, Number(h.current) || 0), target: Math.max(1, Number(h.target) || 1), percent: Math.min(100, Math.max(0, Number(h.percent) || 0)) })) };
+  }
+  out.activityHistory = validHistory;
+  return out;
 }
+function stateReminderHabitExists(habits, id) { return habits.some(h => h && h.id === id); }
+
+function createSyncSnapshot(s) {
+  const snap = clone(s || {});
+  if (snap.profile) snap.profile.avatar = '';
+  return snap;
+}
+function markSyncDirty(previous, current) {
+  if (!currentAuthUser || !previous) return;
+  const keys = ['habits','goals','events','reminders','profile','settings','activityHistory'];
+  for (const key of keys) {
+    if (JSON.stringify(previous[key] ?? null) !== JSON.stringify(current[key] ?? null)) syncDirty[key] = true;
+  }
+}
+function resetSyncTracking(base = state) {
+  syncBaseState = createSyncSnapshot(base);
+  syncLastSavedSnapshot = createSyncSnapshot(base);
+  syncDirty = { habits: false, goals: false, events: false, reminders: false, profile: false, settings: false, activityHistory: false };
+}
+function recordTime(value) {
+  const t = Date.parse(value || '');
+  return Number.isFinite(t) ? t : 0;
+}
+function touchChangedRecords(previous, current) {
+  const now = new Date().toISOString();
+  const collections = ['habits', 'goals', 'events', 'reminders'];
+  for (const key of collections) {
+    const prevMap = new Map((previous?.[key] || []).map(x => [x.id, x]));
+    for (const item of current?.[key] || []) {
+      const before = prevMap.get(item.id);
+      const strip = x => { if (!x) return x; const copy = clone(x); delete copy.updatedAt; return copy; };
+      if (!before || JSON.stringify(strip(before)) !== JSON.stringify(strip(item))) item.updatedAt = now;
+    }
+  }
+  for (const key of ['profile', 'settings']) {
+    if (!current?.[key]) continue;
+    const before = previous?.[key];
+    const strip = x => { if (!x) return x; const copy = clone(x); delete copy.updatedAt; return copy; };
+    if (!before || JSON.stringify(strip(before)) !== JSON.stringify(strip(current[key]))) current[key].updatedAt = now;
+  }
+  if (current?.habits) {
+    const prevMap = new Map((previous?.habits || []).map(x => [x.id, x]));
+    for (const habit of current.habits) {
+      const before = prevMap.get(habit.id);
+      habit.dailyUpdatedAt = habit.dailyUpdatedAt && typeof habit.dailyUpdatedAt === 'object' ? habit.dailyUpdatedAt : {};
+      for (const [date, value] of Object.entries(habit.daily || {})) {
+        if (!before || Number(before.daily?.[date] ?? 0) !== Number(value ?? 0)) habit.dailyUpdatedAt[date] = now;
+      }
+    }
+  }
+}
+function mergeCollectionById(remoteList = [], localList = [], dirty, baseList = [], tombstones = {}) {
+  if (!dirty) return clone(remoteList);
+  const remoteMap = new Map(remoteList.map(x => [x.id, x]));
+  const localMap = new Map(localList.map(x => [x.id, x]));
+  const baseMap = new Map(baseList.map(x => [x.id, x]));
+  const merged = [];
+
+  for (const local of localList) {
+    const remote = remoteMap.get(local.id);
+    if (!remote) { merged.push(clone(local)); continue; }
+
+    const base = baseMap.get(local.id);
+    const localTime = recordTime(local.updatedAt);
+    const remoteTime = recordTime(remote.updatedAt);
+    const localChangedAfterBase = !base || localTime > recordTime(base.updatedAt) || JSON.stringify(local) !== JSON.stringify(base);
+    const remoteChangedAfterBase = !base || remoteTime > recordTime(base.updatedAt) || JSON.stringify(remote) !== JSON.stringify(base);
+
+    if (local.daily && remote.daily) {
+      const winner = localChangedAfterBase && remoteChangedAfterBase
+        ? (localTime >= remoteTime ? clone(local) : clone(remote))
+        : (localChangedAfterBase ? clone(local) : clone(remote));
+      const daily = { ...(remote.daily || {}), ...(local.daily || {}) };
+      const dailyUpdatedAt = { ...(remote.dailyUpdatedAt || {}), ...(local.dailyUpdatedAt || {}) };
+      for (const date of new Set([...Object.keys(remote.daily || {}), ...Object.keys(local.daily || {})])) {
+        const lt = recordTime(local.dailyUpdatedAt?.[date] || local.updatedAt);
+        const rt = recordTime(remote.dailyUpdatedAt?.[date] || remote.updatedAt);
+        if (remote.daily?.[date] !== undefined && local.daily?.[date] !== undefined && rt > lt) daily[date] = remote.daily[date];
+      }
+      winner.daily = daily;
+      winner.dailyUpdatedAt = dailyUpdatedAt;
+      merged.push(winner);
+    } else {
+      merged.push(localChangedAfterBase && remoteChangedAfterBase
+        ? (localTime >= remoteTime ? clone(local) : clone(remote))
+        : (localChangedAfterBase ? clone(local) : clone(remote)));
+    }
+  }
+
+  // A local deletion is represented by a tombstone. If it is newer than the
+  // remote record, the deletion wins and the remote copy is deliberately not
+  // reintroduced. This fixes the old "delete -> Drive restores the habit"
+  // race without making an unrelated newer remote edit disappear.
+  for (const remote of remoteList) {
+    if (localMap.has(remote.id)) continue;
+    const deletedAt = recordTime(tombstones?.[remote.id]);
+    if (deletedAt && deletedAt >= recordTime(remote.updatedAt)) continue;
+    const base = baseMap.get(remote.id);
+    if (base && recordTime(remote.updatedAt) > recordTime(base.updatedAt)) merged.push(clone(remote));
+  }
+  return merged;
+}
+
+function mergeTombstones(remoteMeta = {}, localMeta = {}) {
+  const result = { deleted: {} };
+  for (const kind of ['habits', 'goals', 'events', 'reminders']) {
+    result.deleted[kind] = { ...(remoteMeta?.deleted?.[kind] || {}) };
+    for (const [id, value] of Object.entries(localMeta?.deleted?.[kind] || {})) {
+      const localTime = recordTime(value);
+      const remoteTime = recordTime(result.deleted[kind][id]);
+      if (localTime >= remoteTime) result.deleted[kind][id] = value;
+    }
+  }
+  return result;
+}
+
+function mergeForDriveUpload(remoteState, localState, dirtyOverride = syncDirty, baseOverride = syncBaseState) {
+  const remote = mergeState(remoteState || {});
+  const local = normalizeState(clone(localState));
+  const dirty = dirtyOverride || syncDirty;
+  const base = baseOverride || syncBaseState;
+  const merged = clone(remote);
+  merged.syncMeta = mergeTombstones(remote.syncMeta, local.syncMeta);
+  merged.habits = mergeCollectionById(remote.habits, local.habits, dirty.habits, base?.habits || [], local.syncMeta?.deleted?.habits || {});
+  merged.goals = mergeCollectionById(remote.goals, local.goals, dirty.goals, base?.goals || [], local.syncMeta?.deleted?.goals || {});
+  merged.events = mergeCollectionById(remote.events, local.events, dirty.events, base?.events || [], local.syncMeta?.deleted?.events || {});
+  merged.reminders = mergeCollectionById(remote.reminders, local.reminders, dirty.reminders, base?.reminders || [], local.syncMeta?.deleted?.reminders || {});
+  if (dirty.profile) merged.profile = recordTime(local.profile?.updatedAt) >= recordTime(remote.profile?.updatedAt) ? clone(local.profile) : clone(remote.profile);
+  if (dirty.settings) {
+    const winner = recordTime(local.settings?.updatedAt) >= recordTime(remote.settings?.updatedAt) ? clone(local.settings) : clone(remote.settings);
+    merged.settings = { ...remote.settings, ...winner, storage: { ...remote.settings.storage, ...(winner.storage || {}) }, drive: { ...remote.settings.drive, ...(winner.drive || {}) } };
+  }
+  if (dirty.activityHistory) merged.activityHistory = { ...(remote.activityHistory || {}), ...(local.activityHistory || {}) };
+  return normalizeState(merged);
+}
+
 function save(options = {}) {
   try {
-    const t = todayISO();
-    (state.habits || []).forEach(h => { h.daily = h.daily || {}; h.daily[t] = Math.max(0, Number(h.current) || 0); });
-    captureActivitySnapshot(state, t);
+    const before = syncLastSavedSnapshot ? createSyncSnapshot(state) : null;
+    // save() persists state only. It never manufactures today's habit
+    // progress; progress actions are the only code allowed to write
+    // daily[today].
+    touchChangedRecords(before, state);
+    captureActivitySnapshot(state, todayISO());
+    const changed = !!before && JSON.stringify(before) !== JSON.stringify(createSyncSnapshot(state));
+    if (options.markDirty !== false && before && changed) {
+      markSyncDirty(before, state);
+      state.syncMeta = state.syncMeta || clone(defaultState.syncMeta);
+      state.syncMeta.pending = { ...(state.syncMeta.pending || {}) };
+      for (const key of Object.keys(syncDirty)) {
+        if (syncDirty[key]) state.syncMeta.pending[key] = true;
+      }
+      syncGeneration++;
+    }
     if (currentStorageKey) localStorage.setItem(currentStorageKey, JSON.stringify(state));
+    syncLastSavedSnapshot = createSyncSnapshot(state);
     if (!options.skipDrive) scheduleDriveBackup();
   } catch (e) { console.error('Habitly save failed:', e); }
 }
-
 function driveStorageSelected() {
   const mode = storageMode();
   const d = driveSettings();
@@ -211,7 +374,8 @@ function scheduleDriveBackup() {
   if (!driveStorageSelected() || driveLoginSyncPending || driveLoginSyncBusy) return;
   clearTimeout(driveBackupTimer);
   driveBackupTimer = setTimeout(async () => {
-    if (!driveStorageSelected() || driveLoginSyncPending || driveLoginSyncBusy) return;
+    if (driveLoginSyncBusy || googleDriveBusy) { driveUploadQueued = true; return; }
+    if (!driveStorageSelected() || driveLoginSyncPending || driveRemoteMissing) return;
     if (googleAccessToken && Date.now() < googleTokenExpiresAt - 60000) {
       await uploadDriveBackup({ silent: true });
       return;
@@ -223,7 +387,19 @@ function scheduleDriveBackup() {
         console.warn('Automatic Drive token refresh unavailable:', e);
       }
     }
-  }, 800);
+  }, 75);
+}
+
+function scheduleDriveSyncRetry() {
+  if (driveSyncRetryTimer || driveLoginSyncPending || driveLoginSyncBusy || !driveStorageSelected()) return;
+  if (driveSyncRetryCount >= 4) return;
+  const delays = [1500, 3000, 7000, 15000];
+  const delay = delays[Math.min(driveSyncRetryCount, delays.length - 1)];
+  driveSyncRetryCount++;
+  driveSyncRetryTimer = setTimeout(() => {
+    driveSyncRetryTimer = null;
+    scheduleDriveBackup();
+  }, delay);
 }
 
 function requestDriveToken(prompt = '') {
@@ -374,7 +550,7 @@ function notificationSupported() {
 }
 
 function notificationStorageKey() {
-  return 'habitly_v2_notified_reminders';
+  return `habitly_v2_notified_reminders.${currentAuthUser?.id || 'guest'}`;
 }
 
 function getNotifiedReminders() {
@@ -654,7 +830,7 @@ function reminderOverviewMarkup(date) {
       <span class="reminder-emoji">${esc(habit.emoji || '🔔')}</span>
       <span class="reminder-copy">
         <strong>${esc(habit.name)}</strong>
-        <small>${esc(formatReminderTime(r.time))} · ${esc(reminderSoundLabel(r.sound))}</small>
+        <small>${esc(formatReminderTime(r.time))} · ${esc(reminderSoundLabel(r.sound))} · ${esc((() => { const n = nextReminderOccurrence(r); const iso = n ? dateISO(n) : ''; return iso === todayISO() ? 'Today' : iso ? formatDate(iso) : ''; })())}</small>
       </span>
       <label class="mini-switch" title="${r.enabled === false ? 'Enable reminder' : 'Disable reminder'}">
         <input type="checkbox" data-toggle-reminder="${esc(r.id)}" ${r.enabled !== false ? 'checked' : ''}>
@@ -741,10 +917,19 @@ function reminderForm(id) {
     save(); closeModal(); render(); toast('Reminder deleted');
   });
 }
+function nextReminderOccurrence(reminder, from = new Date()) {
+  if (!reminder || reminder.enabled === false || !reminder.time) return null;
+  const [hours, minutes] = String(reminder.time).split(':').map(Number);
+  if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return null;
+  const now = new Date(from);
+  now.setSeconds(0, 0);
+  const candidate = new Date(now);
+  candidate.setHours(hours, minutes, 0, 0);
+  if (candidate.getTime() <= now.getTime()) candidate.setDate(candidate.getDate() + 1);
+  return candidate;
+}
 function reminderData() {
-  // Reminder center should contain only active/current and upcoming items.
-  // Past calendar dates are deliberately excluded so finished events do not
-  // remain in the dashboard bell or reminder overview.
+  const now = new Date();
   const today = todayISO();
   const events = (state.events || [])
     .filter(e => String(e.date || '') >= today)
@@ -756,29 +941,33 @@ function reminderData() {
       title: e.title,
       date: formatDate(e.date),
       time: e.time || '',
-      kind: 'Event'
+      kind: 'Event',
+      sortKey: `${e.date || ''} ${e.time || ''}`
     }));
 
   const habits = (state.reminders || [])
-    .filter(r => r.source === 'manual' && r.enabled !== false)
+    .filter(r => r && r.source === 'manual' && r.enabled !== false)
     .map(r => {
       const habit = state.habits.find(h => h.id === r.habitId);
       if (!habit || habit.paused) return null;
+      const next = nextReminderOccurrence(r, now);
+      if (!next) return null;
+      const iso = dateISO(next);
       return {
         id: r.id,
         emoji: habit.emoji || '🔔',
         title: habit.name,
-        date: 'Daily reminder',
+        date: iso === today ? 'Today' : iso === dateISO(new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 12)) ? 'Tomorrow' : formatDate(iso),
         time: r.time || '',
-        kind: 'Habit'
+        kind: 'Habit',
+        sortKey: `${iso} ${r.time || ''}`
       };
     })
     .filter(Boolean)
-    .sort((a, b) => String(a.time).localeCompare(String(b.time)));
+    .sort((a, b) => a.sortKey.localeCompare(b.sortKey));
 
   return { events, habits };
 }
-
 function eventNotificationCount() {
   const data = reminderData();
   return data.events.length + data.habits.length;
@@ -848,7 +1037,7 @@ function dashboard() { const habits = state.habits.filter(h => !h.paused), total
 function habitsPage() {
   const avg = Math.round(state.habits.reduce((a, h) => a + pct(h), 0) / Math.max(1, state.habits.length));
   return shell('habits', `<div class="page-title"><span class="eyebrow">YOUR ROUTINES</span><h1>My Habits</h1><p>Build better habits, achieve your goals.</p></div><div class="page-actions"><button class="primary-btn" data-open-habit>+ Add Habit</button></div>
- <section class="habit-summary"><article class="summary-card"><div class="summary-icon purple">☷</div><div><strong>${state.habits.length}</strong><span>Total Habits</span><small>All time</small></div></article><article class="summary-card"><div class="summary-icon green">✓</div><div><strong>${state.habits.filter(h => !h.paused).length}</strong><span>Active Habits</span><small>Keep going!</small></div></article><article class="summary-card"><div class="summary-icon blue">▥</div><div><strong>${avg}%</strong><span>Average Progress</span><small>This month</small></div></article><article class="summary-card"><div class="summary-icon orange">🔥</div><div><strong>12</strong><span>Current Streak</span><small>days</small></div></article></section>
+ <section class="habit-summary"><article class="summary-card"><div class="summary-icon purple">☷</div><div><strong>${state.habits.length}</strong><span>Total Habits</span><small>All time</small></div></article><article class="summary-card"><div class="summary-icon green">✓</div><div><strong>${state.habits.filter(h => !h.paused).length}</strong><span>Active Habits</span><small>Keep going!</small></div></article><article class="summary-card"><div class="summary-icon blue">▥</div><div><strong>${avg}%</strong><span>Average Progress</span><small>This month</small></div></article><article class="summary-card"><div class="summary-icon orange">🔥</div><div><strong>${currentStreak()}</strong><span>Current Streak</span><small>days</small></div></article></section>
  <section class="panel habits-page-panel"><div class="list-toolbar"><div class="filters" id="habitFilters"><button class="filter active" data-habit-filter="all">All Habits</button><button class="filter" data-habit-filter="active">Active</button><button class="filter" data-habit-filter="completed">Completed</button><button class="filter" data-habit-filter="paused">Paused</button></div><label class="sort-select">Sort by:<select id="habitSort"><option value="recent">Recent</option><option value="progress">Progress</option><option value="name">Name</option></select>${icon('chevron')}</label></div><div class="habit-list full" id="habitCards"></div></section>`);
 }
 function renderHabitCards(filter = 'all', sort = 'recent') {
@@ -890,9 +1079,10 @@ function dateISO(d) { return new Date(d.getFullYear(), d.getMonth(), d.getDate()
 function snapshotForDate(date) { const iso = typeof date === 'string' ? date : dateISO(date); return state.activityHistory?.[iso] || null; }
 function dailyProgress(date) { const snap = snapshotForDate(date); if (!snap || !snap.habits.length) return 0; const active = snap.habits.filter(h => !h.paused); if (!active.length) return 0; return Math.round(active.reduce((a, h) => a + Math.max(0, Math.min(100, Number(h.percent) || 0)), 0) / active.length); }
 function dailyCounts(date) { const snap = snapshotForDate(date); if (!snap || !snap.habits.length) return { completed: 0, partial: 0, notDone: 0, total: 0 }; const active = snap.habits.filter(h => !h.paused), completed = active.filter(h => h.percent >= 100).length, partial = active.filter(h => h.percent > 0 && h.percent < 100).length; return { completed, partial, notDone: Math.max(0, active.length - completed - partial), total: active.length }; }
-function weekBounds(cursor) { const start = new Date(cursor); start.setHours(12, 0, 0, 0); start.setDate(start.getDate() - start.getDay()); return { start, days: Array.from({ length: 7 }, (_, i) => { const d = new Date(start); d.setDate(start.getDate() + i); return d; }) }; } function weekView(cursor) { const { days } = weekBounds(cursor); let out = '<div class="week-grid">';['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].forEach((n, i) => { const d = days[i], iso = dateISO(d), p = calendarPercentForDay(d), sel = iso === calendarSelectedDate; out += `<button class="week-day ${sel ? 'selected' : ''} ${p >= 100 ? 'is-complete' : ''} ${p === 0 ? 'is-empty' : ''}" data-cal-date="${iso}"><strong>${n}</strong><span class="day-number">${d.getDate()}</span>${calendarRingMarkup(p, 'week-ring')}<span class="week-percent">${p ? p + '%' : ''}</span><div class="progress-track"><i style="width:${p}%"></i></div></button>` }); return out + '</div>'; }
+function weekStartIndex() { return (state.settings?.habits?.weekStarts || 'Sunday') === 'Monday' ? 1 : 0; }
+function weekBounds(cursor) { const start = new Date(cursor); start.setHours(12, 0, 0, 0); const offset = (start.getDay() - weekStartIndex() + 7) % 7; start.setDate(start.getDate() - offset); return { start, days: Array.from({ length: 7 }, (_, i) => { const d = new Date(start); d.setDate(start.getDate() + i); return d; }) }; } function weekView(cursor) { const { days } = weekBounds(cursor); let out = '<div class="week-grid">';['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].forEach((n, i) => { const d = days[i], iso = dateISO(d), p = calendarPercentForDay(d), sel = iso === calendarSelectedDate; out += `<button class="week-day ${sel ? 'selected' : ''} ${p >= 100 ? 'is-complete' : ''} ${p === 0 ? 'is-empty' : ''}" data-cal-date="${iso}"><strong>${n}</strong><span class="day-number">${d.getDate()}</span>${calendarRingMarkup(p, 'week-ring')}<span class="week-percent">${p ? p + '%' : ''}</span><div class="progress-track"><i style="width:${p}%"></i></div></button>` }); return out + '</div>'; }
 function dayView(cursor) { const iso = dateISO(cursor), p = pctForDate(cursor), items = state.events.filter(e => e.date === iso), habits = calendarHabitsForDay(cursor); return `<div class="day-view"><div class="day-focus"><div class="focus-date">Selected day</div><div class="focus-title-row"><h3>${cursor.toLocaleDateString('en-IN', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}</h3><strong>${p}%</strong></div><div class="progress-line"><i style="width:${p}%"></i></div><div class="day-habit-list">${habits.map(x => `<div class="detail-item"><span class="item-emoji">${esc(x.habit.emoji || '')}</span><span>${esc(x.habit.name)}</span><small>${x.percent}%</small></div>`).join('') || '<p class="muted-copy">No recorded habit activity for this date.</p>'}${items.map(e => `<div class="detail-item"><span class="item-emoji">${esc(e.emoji || '📅')}</span><span>${esc(e.title)}</span><small>${esc(e.time)}</small><button class="icon-delete" data-delete-event="${e.id}">${icon('trash')}</button></div>`).join('')}</div></div></div>`; }
-function initCalendar() { let cursor = new Date(calendarSelectedDate + 'T12:00:00'); if (Number.isNaN(cursor.getTime())) { cursor = new Date(); cursor.setHours(12, 0, 0, 0); } let mode = 'month'; const root = document.querySelector('.page-calendar'); if (!root) return; const body = root.querySelector('#calendarBody'), title = root.querySelector('#monthTitle'), picker = root.querySelector('#monthPicker'); function rebuildPicker() { picker.innerHTML = ''; picker.classList.remove('picker-months', 'picker-weeks', 'picker-days'); if (mode === 'month') { picker.classList.add('picker-months'); for (let i = -6; i <= 6; i++) { const d = new Date(cursor.getFullYear(), cursor.getMonth() + i, 1, 12), b = document.createElement('button'); b.type = 'button'; b.textContent = monthLabel(d); if (d.getMonth() === cursor.getMonth() && d.getFullYear() === cursor.getFullYear()) b.classList.add('active'); b.addEventListener('click', () => { cursor = d; calendarSelectedDate = dateISO(d); picker.classList.add('hidden'); renderCal(); }); picker.appendChild(b); } } else if (mode === 'week') { picker.classList.add('picker-weeks'); const y = cursor.getFullYear(), m = cursor.getMonth(), daysInMonth = new Date(y, m + 1, 0).getDate(), first = new Date(y, m, 1, 12).getDay(), weekCount = Math.ceil((first + daysInMonth) / 7); for (let w = 1; w <= weekCount; w++) { const startDay = (w - 1) * 7 - first + 1, firstDay = Math.max(1, startDay), lastDay = Math.min(daysInMonth, startDay + 6), b = document.createElement('button'); b.type = 'button'; b.textContent = `Week ${w} · ${firstDay}–${lastDay}`; const currentWeek = Math.floor((first + cursor.getDate() - 1) / 7) + 1; if (w === currentWeek) b.classList.add('active'); b.addEventListener('click', () => { cursor = new Date(y, m, firstDay, 12); calendarSelectedDate = dateISO(cursor); picker.classList.add('hidden'); renderCal(); }); picker.appendChild(b); } } else { picker.classList.add('picker-days'); const y = cursor.getFullYear(), m = cursor.getMonth(), days = new Date(y, m + 1, 0).getDate(); for (let n = 1; n <= days; n++) { const b = document.createElement('button'); b.type = 'button'; b.textContent = `${n} · ${new Date(y, m, n, 12).toLocaleDateString('en-IN', { weekday: 'short' })}`; if (n === cursor.getDate()) b.classList.add('active'); b.addEventListener('click', () => { cursor = new Date(y, m, n, 12); calendarSelectedDate = dateISO(cursor); picker.classList.add('hidden'); renderCal(); }); picker.appendChild(b); } } } function renderCal() { title.innerHTML = `${monthLabel(cursor)} ${icon('chevron')}`; body.innerHTML = calendarGrid(cursor, mode); root.querySelectorAll('[data-cal-date]').forEach(b => b.addEventListener('click', () => { cursor = new Date(b.dataset.calDate + 'T12:00:00'); calendarSelectedDate = b.dataset.calDate; renderCal(); })); root.querySelectorAll('[data-delete-event]').forEach(b => b.addEventListener('click', () => { state.events = state.events.filter(e => e.id !== b.dataset.deleteEvent); save(); renderCal(); })); renderDetail(); } function renderDetail() { const d = dateISO(cursor), dayHabits = calendarHabitsForDay(cursor), p = dailyProgress(d), items = state.events.filter(e => e.date === d); root.querySelector('#dayDetail').innerHTML = `<div class="detail-kicker">Selected day</div><div class="detail-title">${cursor.toLocaleDateString('en-IN', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}</div><div class="daily-progress"><span>Daily progress</span><strong>${p}%</strong></div><div class="progress-line"><i style="width:${p}%"></i></div><div class="detail-items">${dayHabits.map(x => `<div class="detail-item"><span class="item-emoji">${esc(x.habit.emoji || '')}</span><span>${esc(x.habit.name)}</span><small>${x.percent}%</small></div>`).join('') || '<p class="muted-copy">No recorded habit activity for this date.</p>'}${items.map(e => `<div class="detail-item"><span class="item-emoji">${esc(e.emoji || '📅')}</span><span>${esc(e.title)}</span><small>${esc(e.time)}</small><button class="icon-delete" data-delete-event="${e.id}">${icon('trash')}</button></div>`).join('')}</div>`; const reminderList = root.querySelector('#calendarReminderList'); if (reminderList) { reminderList.innerHTML = reminderOverviewMarkup(d); root.querySelectorAll('[data-add-reminder]').forEach(b => b.addEventListener('click', () => reminderForm())); } root.querySelectorAll('[data-delete-event]').forEach(b => b.addEventListener('click', () => { state.events = state.events.filter(e => e.id !== b.dataset.deleteEvent); save(); renderCal(); })); root.querySelectorAll('[data-edit-reminder]').forEach(b => b.addEventListener('click', () => reminderForm(b.dataset.editReminder))); root.querySelectorAll('[data-toggle-reminder]').forEach(b => b.addEventListener('change', () => { const r = state.reminders.find(x => x.id === b.dataset.toggleReminder); if (!r) return; r.enabled = b.checked; save(); renderCal(); toast(r.enabled ? 'Reminder enabled' : 'Reminder turned off'); })); } root.querySelectorAll('#calModes button').forEach(b => b.addEventListener('click', () => { mode = b.dataset.mode; root.querySelectorAll('#calModes button').forEach(x => x.classList.toggle('active', x === b)); picker.classList.add('hidden'); rebuildPicker(); renderCal(); })); root.querySelector('#calPrev').addEventListener('click', () => { if (mode === 'month') cursor = new Date(cursor.getFullYear(), cursor.getMonth() - 1, Math.min(cursor.getDate(), 28), 12); else if (mode === 'week') { cursor = new Date(cursor); cursor.setDate(cursor.getDate() - 7); } else { cursor = new Date(cursor); cursor.setDate(cursor.getDate() - 1); } calendarSelectedDate = dateISO(cursor); picker.classList.add('hidden'); rebuildPicker(); renderCal(); }); root.querySelector('#calNext').addEventListener('click', () => { if (mode === 'month') cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, Math.min(cursor.getDate(), 28), 12); else if (mode === 'week') { cursor = new Date(cursor); cursor.setDate(cursor.getDate() + 7); } else { cursor = new Date(cursor); cursor.setDate(cursor.getDate() + 1); } calendarSelectedDate = dateISO(cursor); picker.classList.add('hidden'); rebuildPicker(); renderCal(); }); root.querySelector('#calToday').addEventListener('click', () => { cursor = new Date(); cursor.setHours(12, 0, 0, 0); calendarSelectedDate = dateISO(cursor); picker.classList.add('hidden'); rebuildPicker(); renderCal(); }); title.addEventListener('click', () => { rebuildPicker(); picker.classList.toggle('hidden'); }); calendarSelectedDate = dateISO(cursor); rebuildPicker(); renderCal(); }
+function initCalendar() { let cursor = new Date(calendarSelectedDate + 'T12:00:00'); if (Number.isNaN(cursor.getTime())) { cursor = new Date(); cursor.setHours(12, 0, 0, 0); } let mode = 'month'; const root = document.querySelector('.page-calendar'); if (!root) return; const body = root.querySelector('#calendarBody'), title = root.querySelector('#monthTitle'), picker = root.querySelector('#monthPicker'); function rebuildPicker() { picker.innerHTML = ''; picker.classList.remove('picker-months', 'picker-weeks', 'picker-days'); if (mode === 'month') { picker.classList.add('picker-months'); for (let i = -6; i <= 6; i++) { const d = new Date(cursor.getFullYear(), cursor.getMonth() + i, 1, 12), b = document.createElement('button'); b.type = 'button'; b.textContent = monthLabel(d); if (d.getMonth() === cursor.getMonth() && d.getFullYear() === cursor.getFullYear()) b.classList.add('active'); b.addEventListener('click', () => { cursor = d; calendarSelectedDate = dateISO(d); picker.classList.add('hidden'); renderCal(); }); picker.appendChild(b); } } else if (mode === 'week') { picker.classList.add('picker-weeks'); const y = cursor.getFullYear(), m = cursor.getMonth(), daysInMonth = new Date(y, m + 1, 0).getDate(), first = (new Date(y, m, 1, 12).getDay() - weekStartIndex() + 7) % 7, weekCount = Math.ceil((first + daysInMonth) / 7); for (let w = 1; w <= weekCount; w++) { const startDay = (w - 1) * 7 - first + 1, firstDay = Math.max(1, startDay), lastDay = Math.min(daysInMonth, startDay + 6), b = document.createElement('button'); b.type = 'button'; b.textContent = `Week ${w} · ${firstDay}–${lastDay}`; const currentWeek = Math.floor((first + cursor.getDate() - 1) / 7) + 1; if (w === currentWeek) b.classList.add('active'); b.addEventListener('click', () => { cursor = new Date(y, m, firstDay, 12); calendarSelectedDate = dateISO(cursor); picker.classList.add('hidden'); renderCal(); }); picker.appendChild(b); } } else { picker.classList.add('picker-days'); const y = cursor.getFullYear(), m = cursor.getMonth(), days = new Date(y, m + 1, 0).getDate(); for (let n = 1; n <= days; n++) { const b = document.createElement('button'); b.type = 'button'; b.textContent = `${n} · ${new Date(y, m, n, 12).toLocaleDateString('en-IN', { weekday: 'short' })}`; if (n === cursor.getDate()) b.classList.add('active'); b.addEventListener('click', () => { cursor = new Date(y, m, n, 12); calendarSelectedDate = dateISO(cursor); picker.classList.add('hidden'); renderCal(); }); picker.appendChild(b); } } } function renderCal() { title.innerHTML = `${monthLabel(cursor)} ${icon('chevron')}`; body.innerHTML = calendarGrid(cursor, mode); root.querySelectorAll('[data-cal-date]').forEach(b => b.addEventListener('click', () => { cursor = new Date(b.dataset.calDate + 'T12:00:00'); calendarSelectedDate = b.dataset.calDate; renderCal(); })); root.querySelectorAll('[data-delete-event]').forEach(b => b.addEventListener('click', () => { state.events = state.events.filter(e => e.id !== b.dataset.deleteEvent); save(); renderCal(); })); renderDetail(); } function renderDetail() { const d = dateISO(cursor), dayHabits = calendarHabitsForDay(cursor), p = dailyProgress(d), items = state.events.filter(e => e.date === d); root.querySelector('#dayDetail').innerHTML = `<div class="detail-kicker">Selected day</div><div class="detail-title">${cursor.toLocaleDateString('en-IN', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}</div><div class="daily-progress"><span>Daily progress</span><strong>${p}%</strong></div><div class="progress-line"><i style="width:${p}%"></i></div><div class="detail-items">${dayHabits.map(x => `<div class="detail-item"><span class="item-emoji">${esc(x.habit.emoji || '')}</span><span>${esc(x.habit.name)}</span><small>${x.percent}%</small></div>`).join('') || '<p class="muted-copy">No recorded habit activity for this date.</p>'}${items.map(e => `<div class="detail-item"><span class="item-emoji">${esc(e.emoji || '📅')}</span><span>${esc(e.title)}</span><small>${esc(e.time)}</small><button class="icon-delete" data-delete-event="${e.id}">${icon('trash')}</button></div>`).join('')}</div>`; const reminderList = root.querySelector('#calendarReminderList'); if (reminderList) { reminderList.innerHTML = reminderOverviewMarkup(d); root.querySelectorAll('[data-add-reminder]').forEach(b => b.addEventListener('click', () => reminderForm())); } root.querySelectorAll('[data-delete-event]').forEach(b => b.addEventListener('click', () => { state.events = state.events.filter(e => e.id !== b.dataset.deleteEvent); save(); renderCal(); })); root.querySelectorAll('[data-edit-reminder]').forEach(b => b.addEventListener('click', () => reminderForm(b.dataset.editReminder))); root.querySelectorAll('[data-toggle-reminder]').forEach(b => b.addEventListener('change', () => { const r = state.reminders.find(x => x.id === b.dataset.toggleReminder); if (!r) return; r.enabled = b.checked; save(); renderCal(); toast(r.enabled ? 'Reminder enabled' : 'Reminder turned off'); })); } root.querySelectorAll('#calModes button').forEach(b => b.addEventListener('click', () => { mode = b.dataset.mode; root.querySelectorAll('#calModes button').forEach(x => x.classList.toggle('active', x === b)); picker.classList.add('hidden'); rebuildPicker(); renderCal(); })); root.querySelector('#calPrev').addEventListener('click', () => { if (mode === 'month') cursor = new Date(cursor.getFullYear(), cursor.getMonth() - 1, Math.min(cursor.getDate(), 28), 12); else if (mode === 'week') { cursor = new Date(cursor); cursor.setDate(cursor.getDate() - 7); } else { cursor = new Date(cursor); cursor.setDate(cursor.getDate() - 1); } calendarSelectedDate = dateISO(cursor); picker.classList.add('hidden'); rebuildPicker(); renderCal(); }); root.querySelector('#calNext').addEventListener('click', () => { if (mode === 'month') cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, Math.min(cursor.getDate(), 28), 12); else if (mode === 'week') { cursor = new Date(cursor); cursor.setDate(cursor.getDate() + 7); } else { cursor = new Date(cursor); cursor.setDate(cursor.getDate() + 1); } calendarSelectedDate = dateISO(cursor); picker.classList.add('hidden'); rebuildPicker(); renderCal(); }); root.querySelector('#calToday').addEventListener('click', () => { cursor = new Date(); cursor.setHours(12, 0, 0, 0); calendarSelectedDate = dateISO(cursor); picker.classList.add('hidden'); rebuildPicker(); renderCal(); }); title.addEventListener('click', () => { rebuildPicker(); picker.classList.toggle('hidden'); }); calendarSelectedDate = dateISO(cursor); rebuildPicker(); renderCal(); }
 
 function statisticsPage() { return shell('statistics', `<div class="page-title statistics-title"><h1>Statistics</h1><p>Track your progress and build better habits.</p></div><div class="statistics-controls"><div class="period-switch" id="statPeriods"><button class="active" data-period="day">Day</button><button data-period="week">Week</button><button data-period="month">Month</button><button data-period="custom">Custom Range</button></div><div class="stat-date">${icon('calendar')}<span id="statDate"></span></div><button class="export-btn" id="exportStats">${icon('download')} Export</button></div><section class="kpi-grid" id="statKpis"></section><section class="statistics-grid"><article class="panel trend-panel"><div class="panel-title-row"><h2>Completion Trend</h2><select id="chartMode"><option value="day">Daily</option><option value="week">Weekly</option><option value="month">Monthly</option><option value="custom">Custom</option></select></div><div id="trendChart" class="trend-chart"></div><div class="trend-legend"><span><i></i> Completion</span><span id="trendCaption">Recorded activity</span></div></article><article class="panel performers"><h2>Top Performers</h2><div id="topPerformers"></div></article></section><section class="panel categories-panel"><h2>Habit Categories</h2><div id="categories" class="categories-grid"></div></section>`); }
 function customRangeForm(apply) { modal('Custom range', 'Choose the period used by Statistics.', `<form class="form" id="rangeForm"><div class="form-grid"><div class="field"><label>Start date</label><input type="date" name="start" value="${todayISO()}" required></div><div class="field"><label>End date</label><input type="date" name="end" value="${todayISO()}" required></div></div><div class="form-actions"><button type="button" class="secondary-btn" data-modal-close>Cancel</button><button class="primary-btn">Apply range →</button></div></form>`); document.getElementById('rangeForm').addEventListener('submit', e => { e.preventDefault(); const fd = new FormData(e.target), s = fd.get('start'), en = fd.get('end'); if (s > en) { toast('End date must be after the start date'); return; } apply(s, en); closeModal(); }); }
@@ -911,24 +1101,93 @@ function initStatistics() {
 
 function menuPopover(kind, id) { document.querySelectorAll('.menu-popover').forEach(x => x.remove()); const isGoal = kind === 'goal', items = isGoal ? [['update', 'Update progress'], ['edit', 'Edit goal'], ['pause', 'Pause goal'], ['complete', 'Mark complete'], ['trash', 'Delete goal']] : [['edit', 'Edit habit'], ['reminder', 'Set reminder'], ['trash', 'Delete habit']]; const menu = document.createElement('div'); menu.className = 'menu-popover'; menu.dataset.kind = kind; menu.innerHTML = items.map(([i, t]) => `<button data-menu-action="${i}" data-menu-id="${id}">${icon(i === 'reminder' ? 'bell' : i)}<span>${t}</span></button>`).join(''); const anchor = document.querySelector(`[data-menu="${kind}:${id}"]`); if (!anchor) return; anchor.closest('article').appendChild(menu); const rect = anchor.getBoundingClientRect(); const card = anchor.closest('article').getBoundingClientRect(); menu.style.top = `${Math.min(anchor.offsetTop + 38, card.height - menu.offsetHeight - 10)}px`; menu.style.right = '8px'; }
 function bindHabitInteractions(root) {
-  root.querySelectorAll('[data-habit-action]').forEach(b => b.addEventListener('click', () => {
-    const row = b.closest('.habit-row');
-    const h = state.habits.find(x => x.id === row?.dataset.id);
-    if (!h || h.paused) return;
+  root.querySelectorAll('[data-habit-action]').forEach(b => {
+    let holdTimer = null, repeatTimer = null, holding = false, wasHeld = false;
+    const updateRowVisual = (h, row) => {
+      if (!row) return;
+      const current = Math.max(0, Number(h.current) || 0);
+      const target = Math.max(1, Number(h.target) || 1);
+      const percent = Math.min(100, Math.round(current / target * 100));
+      const value = row.querySelector('.qty-value');
+      const bar = row.querySelector('.progress-track i');
+      const pctEl = row.querySelector('.percent');
+      if (value) value.textContent = `${current} / ${target} ${h.unit || 'times'}`;
+      if (bar) bar.style.width = `${percent}%`;
+      if (pctEl) pctEl.textContent = `${percent}%`;
+      const complete = row.querySelector('[data-habit-action="complete"]');
+      if (complete) {
+        const done = percent >= 100;
+        complete.disabled = !done;
+        complete.classList.toggle('done', done);
+        complete.innerHTML = `<img src="${done ? AS + 'Habitly Leaf White.png' : AS + 'Habitly Leaf Transparent.png'}" alt="${done ? 'Completed' : 'Not complete'}">`;
+      }
+    };
+    const applyAction = (action, amount = 1, shouldRender = true) => {
+      const row = b.closest('.habit-row');
+      const h = state.habits.find(x => x.id === row?.dataset.id);
+      if (!h || h.paused) return;
+      if (action === 'plus') h.current = Math.min(Math.max(1, Number(h.target) || 1), (Number(h.current) || 0) + amount);
+      if (action === 'minus') h.current = Math.max(0, (Number(h.current) || 0) - amount);
+      if (action === 'complete' && pct(h) >= 100) h.current = Math.max(1, Number(h.target) || 1);
+      if (action === 'yes') h.current = 1;
+      if (action === 'no') h.current = 0;
+      h.daily = h.daily || {};
+      h.daily[todayISO()] = h.current;
+      h.dailyUpdatedAt = h.dailyUpdatedAt || {};
+      h.dailyUpdatedAt[todayISO()] = new Date().toISOString();
+      save();
+      if (shouldRender) render();
+      else updateRowVisual(h, row);
+    };
     const action = b.dataset.habitAction;
-    if (action === 'plus') h.current = Math.min(Math.max(1, Number(h.target) || 1), (Number(h.current) || 0) + 1);
-    if (action === 'minus') h.current = Math.max(0, (Number(h.current) || 0) - 1);
-    if (action === 'complete' && pct(h) >= 100) h.current = Math.max(1, Number(h.target) || 1);
-    if (action === 'yes') h.current = 1;
-    if (action === 'no') h.current = 0;
-    h.daily = h.daily || {};
-    h.daily[todayISO()] = h.current;
-    save();
-    render();
-  }));
+    const startHold = e => {
+      if (action !== 'plus' && action !== 'minus') return;
+      if (e.type === 'mousedown' && e.button !== 0) return;
+      holding = true;
+      wasHeld = false;
+      clearTimeout(holdTimer); clearInterval(repeatTimer);
+      holdTimer = setTimeout(() => {
+        if (!holding) return;
+        wasHeld = true;
+        let amount = 5;
+        let interval = 180;
+        // Accelerate long-press input for large targets such as 100 pages.
+        applyAction(action, amount, false);
+        repeatTimer = setInterval(() => {
+          if (!holding) return;
+          applyAction(action, amount, false);
+          if (amount === 5) {
+            amount = 10;
+            interval = 140;
+            clearInterval(repeatTimer);
+            repeatTimer = setInterval(() => {
+              if (holding) applyAction(action, 10, false);
+            }, interval);
+          }
+        }, interval);
+      }, 450);
+    };
+    const stopHold = () => {
+      holding = false;
+      clearTimeout(holdTimer);
+      clearInterval(repeatTimer);
+      holdTimer = null;
+      repeatTimer = null;
+      // The pointerup is followed by a click on most browsers. Keep the flag
+      // until that click arrives so a long press cannot add one extra unit;
+      // the click handler consumes it instead of adding another unit.
+    };
+    b.addEventListener('click', e => {
+      if (wasHeld) { e.preventDefault(); e.stopPropagation(); wasHeld = false; return; }
+      applyAction(action, 1, true);
+    });
+    b.addEventListener('pointerdown', startHold);
+    b.addEventListener('pointerup', stopHold);
+    b.addEventListener('pointercancel', stopHold);
+    b.addEventListener('pointerleave', stopHold);
+  });
   root.querySelectorAll('[data-menu]').forEach(b => b.addEventListener('click', e => { e.stopPropagation(); menuPopover('habit', b.dataset.menu.split(':')[1]); }));
 }
-
 function bindHabitPage() { document.querySelectorAll('[data-habit-filter]').forEach(b => b.addEventListener('click', () => { document.querySelectorAll('[data-habit-filter]').forEach(x => x.classList.toggle('active', x === b)); renderHabitCards(b.dataset.habitFilter, document.getElementById('habitSort').value); })); document.getElementById('habitSort').addEventListener('change', e => { const active = document.querySelector('[data-habit-filter].active')?.dataset.habitFilter || 'all'; renderHabitCards(active, e.target.value); }); }
 function bindGoalInteractions(root) { root.querySelectorAll('[data-menu]').forEach(b => b.addEventListener('click', e => { e.stopPropagation(); menuPopover('goal', b.dataset.menu.split(':')[1]); })); root.querySelectorAll('[data-update-goal]').forEach(b => b.addEventListener('click', e => { e.stopPropagation(); goalProgressForm(b.dataset.updateGoal); })); }
 function bindGoalPage() { document.querySelectorAll('[data-goal-filter]').forEach(b => b.addEventListener('click', () => { const f = b.dataset.goalFilter; if (!f) return; document.querySelectorAll('[data-goal-filter]').forEach(x => x.classList.toggle('active', x === b)); renderGoals(f); })); }
@@ -953,9 +1212,12 @@ function calendarDailyProgress(d) { return dailyProgress(dateISO(d)); }
 function calendarPercentForDay(d) { return calendarDailyProgress(d); }
 function calendarGrid(cursor, mode) { if (mode === 'week') return weekView(cursor); if (mode === 'day') return dayView(cursor); return monthView(cursor); }
 function monthView(cursor) {
-  const y = cursor.getFullYear(), m = cursor.getMonth(), first = new Date(y, m, 1, 12).getDay(), days = new Date(y, m + 1, 0).getDate();
+  const y = cursor.getFullYear(), m = cursor.getMonth(), firstDay = new Date(y, m, 1, 12).getDay(), days = new Date(y, m + 1, 0).getDate();
+  const start = weekStartIndex();
+  const first = (firstDay - start + 7) % 7;
   let out = '<div class="calendar-grid">';
-  ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].forEach(x => out += `<div class="weekday">${x}</div>`);
+  const names = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  names.slice(start).concat(names.slice(0, start)).forEach(x => out += `<div class="weekday">${x}</div>`);
   let cells = 0;
   const prevDays = new Date(y, m, 0, 12).getDate();
   for (let i = 0; i < first; i++) { out += `<div class="cal-day muted"><span class="day-number">${prevDays - first + i + 1}</span></div>`; cells++; }
@@ -968,9 +1230,11 @@ function monthView(cursor) {
   return out + '</div>';
 }
 function weekView(cursor) {
-  const start = new Date(cursor); start.setHours(12, 0, 0, 0); start.setDate(start.getDate() - start.getDay());
+  const { start } = weekBounds(cursor);
   let out = '<div class="week-grid">';
-  ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].forEach((n, i) => {
+  const names = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const offset = weekStartIndex();
+  names.slice(offset).concat(names.slice(0, offset)).forEach((n, i) => {
     const d = new Date(start); d.setDate(start.getDate() + i); const iso = dateISO(d), p = calendarPercentForDay(d), sel = iso === calendarSelectedDate;
     out += `<button class="week-day ${sel ? 'selected' : ''} ${p >= 100 ? 'is-complete' : ''} ${p === 0 ? 'is-empty' : ''}" data-cal-date="${iso}"><strong>${n}</strong><span class="day-number">${d.getDate()}</span>${calendarRingMarkup(p, 'week-ring')}<span class="week-percent">${p ? p + '%' : ''}</span><div class="progress-track"><i style="width:${p}%"></i></div></button>`;
   });
@@ -985,9 +1249,11 @@ function accountStorageMode() { return currentAuthUser?.user_metadata?.habitly_s
 function storageMode() { return accountStorageMode(); }
 function backupStatusText(d) {
   if (!d?.connected) return 'Connect Google Drive to start cloud backups.';
-  if (!d.lastBackupDate) return 'Waiting for your first automatic backup.';
-  if (d.lastBackupDate === todayISO()) return `Backed up today · ${formatBackupTime(d.lastBackupAt)}`;
-  return 'Waiting for today’s automatic backup.';
+  const backupStamp = d.lastBackupAt || '';
+  const backupDay = backupStamp ? dateISO(new Date(backupStamp)) : (d.lastBackupDate || '');
+  if (backupDay === todayISO()) return `Backed up today · ${formatBackupTime(backupStamp)}`;
+  if (backupDay) return `Last backup · ${formatBackupTime(backupStamp)}`;
+  return 'Waiting for your first automatic backup.';
 }
 function showStorageOnboarding() {
   if (!currentAuthUser || storageIsConfigured() || storageOnboardingBusy) return;
@@ -1010,7 +1276,7 @@ async function chooseStorage(mode) {
   const title = mode === 'both' ? 'Connect Google Drive' : 'Set up Google Drive';
   modal(title, 'Google permission is required to finish your storage setup.', `<div class="storage-progress"><div class="storage-progress-icon">${icon('cloud')}</div><h3>Connect your Google Drive</h3><p>Habitly will create or use its dedicated backup folder and finish setup before opening your dashboard.</p><div class="storage-progress-steps"><span>1. Authorize Google Drive</span><span>2. Verify access</span><span>3. Create your Habitly backup</span></div><div class="form-actions"><button class="secondary-btn" id="storageCancel">Cancel</button><button class="primary-btn" id="storageConnect">Continue with Google Drive ${icon('arrow')}</button></div></div>`);
   document.getElementById('storageCancel')?.addEventListener('click', () => { storageOnboardingMode = ''; storageOnboardingBusy = false; closeModal(); });
-  document.getElementById('storageConnect')?.addEventListener('click', () => { if (!ensureDriveClient()) { storageOnboardingBusy = false; return; } googleTokenClient.requestAccessToken({ prompt: 'consent' }); });
+  document.getElementById('storageConnect')?.addEventListener('click', async () => { if (!ensureDriveClient()) { storageOnboardingBusy = false; return; } try { await requestDriveToken('consent'); } catch (_) { storageOnboardingBusy = false; } });
 }
 async function persistStorageChoice(mode) {
   try {
@@ -1088,8 +1354,13 @@ function ensureDriveClient() {
         googleTokenClient.__habitlyReject = null;
         if (response.error) {
           reject?.(new Error(response.error));
-          if (driveLoginSyncPending) { driveLoginSyncPending = false; driveLoginSyncBusy = false; }
-          else toast('Google authorization was not completed');
+          if (driveLoginSyncPending) {
+            // Leave driveLoginSyncPending true — see scheduleDriveLoginSyncRetry.
+            driveLoginSyncBusy = false;
+            scheduleDriveLoginSyncRetry();
+          } else {
+            toast('Google authorization was not completed');
+          }
           return;
         }
         googleAccessToken = response.access_token || '';
@@ -1114,25 +1385,291 @@ async function driveRequest(url, options = {}) {
   headers.set('Authorization', `Bearer ${googleAccessToken}`);
   return fetch(url, { ...options, headers });
 }
-function backupPayload() { const safeState = clone(state); if (safeState.profile) safeState.profile.avatar = ''; return { backupVersion: 1, app: 'Habitly', updatedAt: new Date().toISOString(), data: safeState }; }
+function backupPayload(sourceState = state) { const safeState = clone(sourceState); if (safeState.profile) safeState.profile.avatar = ''; return { backupVersion: 3, app: 'Habitly', accountId: currentAuthUser?.id || '', updatedAt: new Date().toISOString(), data: safeState }; }
 async function findOrCreateDriveFolder() {
   const q = encodeURIComponent("name='Habitly Backups' and mimeType='application/vnd.google-apps.folder' and trashed=false");
   const res = await driveRequest(`https://www.googleapis.com/drive/v3/files?q=${q}&spaces=drive&fields=files(id,name)&pageSize=10`); if (!res.ok) throw new Error('Drive folder lookup failed'); const data = await res.json(); if (data.files?.[0]) return data.files[0].id;
   const create = await driveRequest('https://www.googleapis.com/drive/v3/files', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Habitly Backups', mimeType: 'application/vnd.google-apps.folder' }) }); if (!create.ok) throw new Error('Drive folder creation failed'); return (await create.json()).id;
 }
-async function findDriveBackup(folderId) { const q = encodeURIComponent(`name='Habitly_Backup.json' and '${folderId}' in parents and trashed=false`); const res = await driveRequest(`https://www.googleapis.com/drive/v3/files?q=${q}&spaces=drive&fields=files(id,name,modifiedTime,size)&pageSize=10`); if (!res.ok) throw new Error('Drive backup lookup failed'); const data = await res.json(); return data.files?.[0] || null; }
+async function findDriveBackup(folderId) { const q = encodeURIComponent(`name='Habitly_Backup.json' and '${folderId}' in parents and trashed=false`); const res = await driveRequest(`https://www.googleapis.com/drive/v3/files?q=${q}&spaces=drive&fields=files(id,name,modifiedTime,size,parents,trashed)&orderBy=modifiedTime desc&pageSize=10`); if (!res.ok) throw new Error('Drive backup lookup failed'); const data = await res.json(); return data.files?.[0] || null; }
+async function validateDriveBackupFile(fileId, folderId) {
+  if (!fileId) return null;
+  try {
+    const res = await driveRequest(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?fields=id,name,modifiedTime,size,parents,trashed`);
+    if (!res.ok) return null;
+    const file = await res.json();
+    if (file.trashed || file.name !== 'Habitly_Backup.json' || (folderId && !(file.parents || []).includes(folderId))) return null;
+    return file;
+  } catch (_) { return null; }
+}
+async function resolveDriveFolder(existingId = '') {
+  if (existingId) {
+    try {
+      const res = await driveRequest(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(existingId)}?fields=id,name,mimeType,trashed`);
+      if (res.ok) { const f = await res.json(); if (!f.trashed && f.name === 'Habitly Backups' && f.mimeType === 'application/vnd.google-apps.folder') return f.id; }
+    } catch (_) {}
+  }
+  return findOrCreateDriveFolder();
+}
 async function cleanupDriveRevisions(fileId) { try { const meta = await driveRequest(`https://www.googleapis.com/drive/v3/files/${fileId}?fields=headRevisionId`); if (!meta.ok) return; const head = (await meta.json()).headRevisionId; const r = await driveRequest(`https://www.googleapis.com/drive/v3/files/${fileId}/revisions?fields=revisions(id,keepForever)`); if (!r.ok) return; const data = await r.json(); for (const rev of (data.revisions || [])) { if (rev.id !== head && !rev.keepForever) { await driveRequest(`https://www.googleapis.com/drive/v3/files/${fileId}/revisions/${rev.id}`, { method: 'DELETE' }); } } } catch (e) { console.warn('Revision cleanup skipped', e); } }
 async function uploadDriveBackup(options = {}) {
-  if (googleDriveBusy) return false; googleDriveBusy = true; try { if (!googleAccessToken) throw new Error('Connect Google Drive first'); const d = driveSettings(); const folderId = d.folderId || await findOrCreateDriveFolder(); let file = d.fileId ? { id: d.fileId } : await findDriveBackup(folderId); const body = JSON.stringify(backupPayload()); let res, result; if (file) { res = await driveRequest(`https://www.googleapis.com/upload/drive/v3/files/${file.id}?uploadType=media`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body }); if (!res.ok) { const text = await res.text(); throw new Error(text || 'Drive upload failed'); } result = await res.json(); } else { const create = await driveRequest('https://www.googleapis.com/drive/v3/files?fields=id,name,modifiedTime', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Habitly_Backup.json', parents: [folderId], mimeType: 'application/json' }) }); if (!create.ok) { const text = await create.text(); throw new Error(text || 'Drive file creation failed'); } result = await create.json(); const upload = await driveRequest(`https://www.googleapis.com/upload/drive/v3/files/${result.id}?uploadType=media`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body }); if (!upload.ok) { const text = await upload.text(); throw new Error(text || 'Drive upload failed'); } result = await upload.json(); } await cleanupDriveRevisions(result.id || file?.id); d.connected = true; d.folderId = folderId; d.fileId = result.id || file?.id || ''; d.lastBackupDate = todayISO(); d.lastBackupAt = new Date().toISOString(); save({ skipDrive: true }); if (!options.silent) toast('Habitly backup updated in Google Drive'); return true; } catch (err) { console.error(err); toast(err.message?.includes('401') ? 'Google Drive authorization expired. Reconnect Drive.' : err.message?.includes('403') ? 'Google Drive permission was denied. Reconnect Drive and allow Drive access.' : 'Google Drive backup failed'); return false; } finally { googleDriveBusy = false; }
+  if (driveRemoteMissing && !options.force) return false;
+  if (googleDriveBusy) {
+    driveUploadQueued = true;
+    return false;
+  }
+
+  googleDriveBusy = true;
+  let ok = false;
+  const uploadGeneration = syncGeneration;
+  const localSnapshot = normalizeState(clone(state));
+  const dirtySnapshot = { ...syncDirty };
+  const baselineSnapshot = syncBaseState ? clone(syncBaseState) : null;
+  let d = driveSettings();
+  const prevLastBackupDate = d.lastBackupDate;
+  const prevLastBackupAt = d.lastBackupAt;
+
+  try {
+    if (!googleAccessToken) throw new Error('Connect Google Drive first');
+
+    /*
+      FAST SYNC PATH
+      ----------------
+      Normal saves must be cheap. The previous implementation validated the
+      folder, validated the file, searched for the file, checked its metadata,
+      and then uploaded. That made every small habit click pay for several
+      sequential Google Drive requests.
+
+      We now trust the already-confirmed fileId/folderId as CACHE HINTS and
+      validate only what is necessary:
+        1. one metadata request for the cached backup file
+        2. download only if the remote file changed
+        3. one upload
+
+      If an ID is stale/deleted, we fall back to discovery exactly once.
+      This keeps the safety guarantees without making ordinary sync slow.
+    */
+    let fileId = d.fileId || '';
+    let folderId = d.folderId || '';
+    let file = null;
+
+    const discover = async () => {
+      folderId = await resolveDriveFolder(folderId || '');
+      file = await findDriveBackup(folderId);
+      fileId = file?.id || '';
+      return file;
+    };
+
+    if (fileId) {
+      const metaRes = await driveRequest(
+        `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?fields=id,name,modifiedTime,parents,trashed`
+      );
+      if (metaRes.ok) {
+        const meta = await metaRes.json();
+        if (!meta.trashed && meta.name === 'Habitly_Backup.json' && (!folderId || (meta.parents || []).includes(folderId))) {
+          file = meta;
+        } else {
+          file = await discover();
+        }
+      } else if (metaRes.status === 404) {
+        file = await discover();
+      } else {
+        throw new Error('Could not verify the Google Drive backup before syncing');
+      }
+    } else {
+      file = await discover();
+    }
+
+    let uploadState = localSnapshot;
+    let remoteState = null;
+    const remoteChanged = !!(
+      fileId &&
+      driveLastKnownRemoteModifiedAt &&
+      file?.modifiedTime &&
+      file.modifiedTime !== driveLastKnownRemoteModifiedAt
+    );
+
+    if (remoteChanged && fileId) {
+      const remoteResponse = await driveRequest(
+        `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media`
+      );
+      if (!remoteResponse.ok) throw new Error('Remote backup could not be read');
+      remoteState = validateBackupEnvelope(await remoteResponse.json());
+      uploadState = mergeForDriveUpload(
+        remoteState,
+        localSnapshot,
+        dirtySnapshot,
+        baselineSnapshot
+      );
+    }
+
+    const nextBackupDate = todayISO();
+    const nextBackupAt = new Date().toISOString();
+    const body = JSON.stringify(backupPayload(uploadState));
+    let result = null;
+
+    if (fileId) {
+      const res = await driveRequest(
+        `https://www.googleapis.com/upload/drive/v3/files/${encodeURIComponent(fileId)}?uploadType=media`,
+        { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body }
+      );
+
+      if (!res.ok) {
+        if (res.status === 404) {
+          // The cached file ID became invalid between metadata lookup and
+          // upload. Re-discover once and retry against the current backup.
+          file = await discover();
+          fileId = file?.id || '';
+          if (fileId) {
+            const retry = await driveRequest(
+              `https://www.googleapis.com/upload/drive/v3/files/${encodeURIComponent(fileId)}?uploadType=media`,
+              { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body }
+            );
+            if (!retry.ok) {
+              const text = await retry.text();
+              throw new Error(text || 'Drive upload failed');
+            }
+            result = await retry.json();
+          }
+        } else {
+          const text = await res.text();
+          throw new Error(text || 'Drive upload failed');
+        }
+      } else {
+        result = await res.json();
+      }
+    }
+
+    if (!result) {
+      // A previously synchronized account must never recreate a deleted/missing
+      // backup automatically. Only an explicit Back up now can do that.
+      if (d.remoteEverSynced && !options.force) {
+        driveRemoteMissing = true;
+        throw new Error('Remote Habitly backup is missing. Confirm the backup before creating a new one.');
+      }
+
+      folderId = folderId || await resolveDriveFolder('');
+      const create = await driveRequest(
+        'https://www.googleapis.com/drive/v3/files?fields=id,name,modifiedTime',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: 'Habitly_Backup.json',
+            parents: [folderId],
+            mimeType: 'application/json'
+          })
+        }
+      );
+      if (!create.ok) {
+        const text = await create.text();
+        throw new Error(text || 'Drive file creation failed');
+      }
+      const created = await create.json();
+      const upload = await driveRequest(
+        `https://www.googleapis.com/upload/drive/v3/files/${encodeURIComponent(created.id)}?uploadType=media`,
+        { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body }
+      );
+      if (!upload.ok) {
+        const text = await upload.text();
+        throw new Error(text || 'Drive upload failed');
+      }
+      result = await upload.json();
+      fileId = created.id;
+    }
+
+    const uploadedRemoteTime = result.modifiedTime || nextBackupAt;
+    d = driveSettings();
+    d.connected = true;
+    d.folderId = folderId;
+    d.fileId = result.id || fileId || '';
+    d.remoteEverSynced = true;
+    d.lastRemoteUpdatedAt = uploadedRemoteTime;
+    d.lastBackupDate = nextBackupDate;
+    d.lastBackupAt = nextBackupAt;
+    d.syncRevision = (Number(d.syncRevision) || 0) + 1;
+    driveLastKnownRemoteModifiedAt = uploadedRemoteTime;
+    driveLastSyncCheckAt = Date.now();
+    driveSyncRetryCount = 0;
+    clearTimeout(driveSyncRetryTimer);
+    driveSyncRetryTimer = null;
+    driveRemoteMissing = false;
+
+    if (uploadGeneration === syncGeneration) {
+      // The exact local generation we uploaded is still current. Confirm only
+      // the state represented by that upload; never replace a newer local state.
+      state = normalizeState(uploadState);
+      state.syncMeta.pending = { ...(state.syncMeta.pending || {}) };
+      for (const key of Object.keys(dirtySnapshot)) {
+        if (dirtySnapshot[key]) state.syncMeta.pending[key] = false;
+      }
+      resetSyncTracking(state);
+      if (currentStorageKey) localStorage.setItem(currentStorageKey, JSON.stringify(state));
+    } else {
+      // A newer local change happened while Drive was uploading. Keep the live
+      // UI/state untouched and queue the newest generation immediately.
+      syncBaseState = createSyncSnapshot(uploadState);
+      syncLastSavedSnapshot = createSyncSnapshot(state);
+      syncDirty = { habits:false, goals:false, events:false, reminders:false, profile:false, settings:false, activityHistory:false };
+      markSyncDirty(uploadState, state);
+      driveUploadQueued = true;
+      if (currentStorageKey) localStorage.setItem(currentStorageKey, JSON.stringify(state));
+    }
+
+    if (!options.silent) toast('Habitly synced to Google Drive');
+    ok = true;
+  } catch (err) {
+    console.error('Drive upload failed:', err);
+    d = driveSettings();
+    d.lastBackupDate = prevLastBackupDate;
+    d.lastBackupAt = prevLastBackupAt;
+    toast(
+      err.message?.includes('401')
+        ? 'Google Drive authorization expired. Reconnect Drive.'
+        : err.message?.includes('403')
+          ? 'Google Drive permission was denied. Reconnect Drive and allow Drive access.'
+          : 'Google Drive sync failed — your local data is safe.'
+    );
+    scheduleDriveSyncRetry();
+    ok = false;
+  } finally {
+    googleDriveBusy = false;
+    if (driveUploadQueued) {
+      driveUploadQueued = false;
+      queueMicrotask(() => scheduleDriveBackup());
+    }
+  }
+  return ok;
 }
 async function finishDriveConnection() {
   try {
     const d = driveSettings();
-    const folderId = d.folderId || await findOrCreateDriveFolder();
-    const file = d.fileId ? { id: d.fileId } : await findDriveBackup(folderId);
+    const authorizedEmail = await getGoogleEmail();
+
+    // GOOGLE ACCOUNT SAFETY: reconnecting under a different Google account
+    // than the one already associated with this Habitly account's backup
+    // could otherwise silently point Habitly at (and overwrite) someone
+    // else's Drive data. Ask before proceeding instead.
+    if (d.email && authorizedEmail && authorizedEmail.toLowerCase() !== d.email.toLowerCase() && !storageOnboardingMode) {
+      googleAccessToken = ''; googleTokenExpiresAt = 0;
+      modal('Switch Google Drive account?', '', `<div class="confirm-box"><p>Habitly's Google Drive backup for this account is currently connected as <strong>${esc(d.email)}</strong>. You just authorized <strong>${esc(authorizedEmail)}</strong> instead.</p><p>Continuing will use ${esc(authorizedEmail)}'s Habitly backup (or create one) and stop using ${esc(d.email)}'s data.</p><div class="form-actions"><button class="secondary-btn" data-modal-close>Cancel</button><button class="primary-btn" id="confirmDriveSwitch">Use ${esc(authorizedEmail)}</button></div></div>`);
+      document.getElementById('confirmDriveSwitch')?.addEventListener('click', async () => {
+        closeModal();
+        d.folderId = ''; d.fileId = ''; d.email = authorizedEmail;
+        save({ skipDrive: true });
+        if (!ensureDriveClient()) return;
+        requestDriveToken('consent').catch(() => {});
+      });
+      return;
+    }
+
+    const folderId = await resolveDriveFolder(d.folderId);
+    const file = (await validateDriveBackupFile(d.fileId, folderId)) || await findDriveBackup(folderId);
     d.connected = true; d.folderId = folderId; d.fileId = file?.id || '';
-    const email = await getGoogleEmail(); if (email) d.email = email;
-    save({ skipDrive: true });
+     driveLastKnownRemoteModifiedAt = file?.modifiedTime || '';
+     driveLastSyncCheckAt = Date.now();
+    if (authorizedEmail) d.email = authorizedEmail;
+    save({ skipDrive: true, markDirty: false });
     if (storageOnboardingMode) {
       const mode = storageOnboardingMode;
       const ok = await uploadDriveBackup();
@@ -1154,41 +1691,203 @@ async function finishDriveConnection() {
   }
 }
 async function getGoogleEmail() { try { const r = await driveRequest('https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)'); if (!r.ok) return ''; return (await r.json()).user?.emailAddress || ''; } catch (e) { return ''; } }
-async function syncDriveOnLogin() {
-  if (!currentAuthUser || driveLoginSyncBusy || driveLoginSyncedUserId === currentAuthUser.id) return;
+// If a login-time Drive sync fails, driveLoginSyncPending is deliberately left
+// TRUE (see scheduleDriveBackup / save). That keeps automatic backup uploads
+// blocked for this session so a temporary failure (offline, expired grant,
+// slow Google script load, etc.) can never push a stale or empty local copy
+// on top of the good backup already sitting in the user's Drive. A single
+// safe retry is scheduled; after that the user can reconnect manually from
+// Settings, which re-enters this same function.
+function scheduleDriveLoginSyncRetry() {
+  if (!currentAuthUser) return;
+  if (driveLoginSyncRetryUsed) {
+    toast('Could not sync with Google Drive automatically. Your local data is safe — reconnect Google Drive in Settings to sync.');
+    appPhase = 'READY';
+    if (currentRoute() !== 'login') render();
+    return;
+  }
+  driveLoginSyncRetryUsed = true;
+  clearTimeout(driveLoginSyncRetryTimer);
+  driveLoginSyncRetryTimer = setTimeout(() => {
+    if (driveLoginSyncPending && currentAuthUser && driveClientReady()) requestDriveToken('').catch(() => {});
+  }, 6000);
+}
+
+// Waits (briefly, with a bounded number of attempts) for the Google Identity
+// Services script to finish loading before requesting a Drive token for the
+// post-login sync. While it waits, driveLoginSyncPending stays true so no
+// automatic backup can run against an unsynced local copy.
+function attemptDriveLoginSync() {
+  if (!driveLoginSyncPending || !currentAuthUser) return;
+  if (!driveClientReady()) {
+    if (driveLoginSyncWaitAttempts++ < 20) {
+      clearTimeout(driveLoginSyncRetryTimer);
+      driveLoginSyncRetryTimer = setTimeout(attemptDriveLoginSync, 500);
+      return;
+    }
+    // Google Identity Services never finished loading (e.g. blocked script,
+    // offline). Stop waiting so the UI isn't stuck on the restoring screen
+    // forever. driveLoginSyncPending stays true, which keeps automatic
+    // uploads blocked for this session — local data is shown, but nothing
+    // can overwrite the real Drive backup until the user reconnects.
+    toast('Could not reach Google Drive. Your local data is shown — reconnect Google Drive in Settings to sync.');
+    appPhase = 'READY';
+    if (currentRoute() !== 'login') render();
+    return;
+  }
+  driveLoginSyncWaitAttempts = 0;
+  if (!ensureDriveClient()) {
+    // Drive not configured (e.g. missing OAuth client ID); ensureDriveClient()
+    // already surfaced a toast. Same reasoning as above: stop blocking the UI.
+    appPhase = 'READY';
+    if (currentRoute() !== 'login') render();
+    return;
+  }
+  requestDriveToken('').catch(() => {});
+}
+
+function validateBackupEnvelope(incoming) {
+  if (!incoming || typeof incoming !== 'object' || Array.isArray(incoming)) throw new Error('Invalid Habitly backup');
+  if (incoming.app && incoming.app !== 'Habitly') throw new Error('This is not a Habitly backup');
+  if (incoming.accountId && currentAuthUser?.id && incoming.accountId !== currentAuthUser.id) throw new Error('This Habitly backup belongs to another account');
+  const raw = incoming.data || incoming;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Habitly backup data is invalid');
+  return normalizeState(mergeState(raw));
+}
+async function syncDriveOnLogin(options = {}) {
+  if (!currentAuthUser || driveLoginSyncBusy || (!options.refresh && driveLoginSyncedUserId === currentAuthUser.id)) return;
   driveLoginSyncBusy = true;
+  let succeeded = false;
   try {
     const d = driveSettings();
-    const folderId = d.folderId || await findOrCreateDriveFolder();
-    const file = d.fileId ? { id: d.fileId } : await findDriveBackup(folderId);
+
+    // GOOGLE ACCOUNT SAFETY: if Drive was previously connected for this
+    // Habitly account under one Google email, and the token we were just
+    // granted belongs to a *different* Google account, stop before looking
+    // up or touching any file. Silently continuing here could show (or
+    // overwrite) a completely different Google account's Habitly backup.
+    const authorizedEmail = await getGoogleEmail();
+    if (d.email && authorizedEmail && authorizedEmail.toLowerCase() !== d.email.toLowerCase()) {
+      googleAccessToken = '';
+      googleTokenExpiresAt = 0;
+      toast(`Google Drive is connected as ${d.email}, but ${authorizedEmail} was authorized. Reconnect the correct Google account in Settings to sync.`);
+      return; // succeeded stays false; finally schedules the normal single retry.
+    }
+
+    const folderId = await resolveDriveFolder(d.folderId);
+    const file = (await validateDriveBackupFile(d.fileId, folderId)) || await findDriveBackup(folderId);
     d.connected = true;
     d.folderId = folderId;
     d.fileId = file?.id || '';
-    const email = await getGoogleEmail();
-    if (email) d.email = email;
+    if (authorizedEmail) d.email = authorizedEmail;
     save({ skipDrive: true });
 
     if (!file) {
-      await uploadDriveBackup({ silent: true });
-      return;
+      // A missing remote file is safe to initialize only when this browser
+      // has never synchronized remote data before. If local state exists from
+      // an earlier session, do not silently overwrite a deleted/missing cloud
+      // backup with potentially stale local data.
+      const hasMeaningfulLocalData = !!currentStorageKey && (() => {
+        try {
+          const raw = localStorage.getItem(currentStorageKey);
+          if (!raw) return false;
+          const parsed = JSON.parse(raw);
+          return !!((parsed.habits || []).some(h => Number(h.current) > 0 || Object.keys(h.daily || {}).length) || (parsed.goals || []).length || (parsed.events || []).length || (parsed.reminders || []).length || Object.keys(parsed.activityHistory || {}).length);
+        } catch (_) { return false; }
+      })();
+      if (d.remoteEverSynced || hasMeaningfulLocalData) {
+        d.connected = true;
+        d.folderId = folderId;
+        d.fileId = '';
+        d.lastRemoteUpdatedAt = '';
+        driveLastKnownRemoteModifiedAt = '';
+        driveLastSyncCheckAt = 0;
+        driveRemoteMissing = true;
+        resetSyncTracking(state);
+        save({ skipDrive: true, markDirty: false });
+        toast('Google Drive backup not found. Your local data is safe; use Back up now after confirming this is the data you want to upload.');
+        succeeded = true;
+      } else {
+        succeeded = await uploadDriveBackup({ silent: true, force: true });
+      }
+    } else {
+      const response = await driveRequest(`https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`);
+      if (!response.ok) throw new Error('Could not download Habitly backup');
+      const incoming = await response.json();
+      const localAvatar = state.profile?.avatar || '';
+      // normalizeState applies the same day-boundary logic used for local
+      // localStorage loads: a habit's "current" only carries over into today
+      // if the backup already has an entry for *today's* date in that
+      // habit's daily map. Without this, a backup captured on an earlier
+      // day would have its old current values blindly re-stamped onto
+      // today (see save() below), which is what was silently freezing
+      // progress at whatever it was on the last real backup day.
+      const remoteState = validateBackupEnvelope(incoming);
+      const persistedPending = { ...(state.syncMeta?.pending || {}) };
+      const hasPendingLocalChanges = Object.values(persistedPending).some(Boolean) || Object.values(syncDirty).some(Boolean);
+      // A previous session may have changed data while Drive was unavailable.
+      // Persisted pending flags survive logout/login, so do not blindly replace
+      // those local edits/deletions with the older remote copy. Merge only the
+      // collections that were actually pending; untouched collections remain
+      // remote-authoritative.
+      state = hasPendingLocalChanges
+        ? mergeForDriveUpload(remoteState, state, {
+            habits: !!(persistedPending.habits || syncDirty.habits),
+            goals: !!(persistedPending.goals || syncDirty.goals),
+            events: !!(persistedPending.events || syncDirty.events),
+            reminders: !!(persistedPending.reminders || syncDirty.reminders),
+            profile: !!(persistedPending.profile || syncDirty.profile),
+            settings: !!(persistedPending.settings || syncDirty.settings),
+            activityHistory: !!(persistedPending.activityHistory || syncDirty.activityHistory)
+          }, null)
+        : remoteState;
+      if (localAvatar && !state.profile.avatar) state.profile.avatar = localAvatar;
+      state.settings.storage = { ...(state.settings.storage || {}), mode: storageMode(), setupCompleted: true };
+      const restoredDrive = driveSettings();
+      restoredDrive.connected = true;
+      restoredDrive.folderId = folderId;
+      restoredDrive.fileId = file.id;
+      restoredDrive.remoteEverSynced = true;
+      restoredDrive.lastRemoteUpdatedAt = incoming.updatedAt || file.modifiedTime || '';
+      restoredDrive.lastBackupAt = restoredDrive.lastBackupAt || incoming.updatedAt || file.modifiedTime || '';
+       driveLastKnownRemoteModifiedAt = file.modifiedTime || incoming.updatedAt || '';
+       driveLastSyncCheckAt = Date.now();
+      const pendingAfterMerge = { ...(state.syncMeta?.pending || {}) };
+      const hadLocalChanges = Object.values(pendingAfterMerge).some(Boolean) || Object.values(syncDirty).some(Boolean);
+      // Keep the pending flags until the merged state has actually been
+      // uploaded. A login-time restore must never turn an unsynced local
+      // deletion/edit into a clean state prematurely.
+      resetSyncTracking(state);
+      driveRemoteMissing = false;
+      save({ skipDrive: true, markDirty: false });
+      succeeded = true;
+      if (hadLocalChanges) {
+        syncDirty = {
+          habits: !!pendingAfterMerge.habits,
+          goals: !!pendingAfterMerge.goals,
+          events: !!pendingAfterMerge.events,
+          reminders: !!pendingAfterMerge.reminders,
+          profile: !!pendingAfterMerge.profile,
+          settings: !!pendingAfterMerge.settings,
+          activityHistory: !!pendingAfterMerge.activityHistory
+        };
+        syncGeneration++;
+        await uploadDriveBackup({ silent: true });
+      }
     }
-
-    const response = await driveRequest(`https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`);
-    if (!response.ok) throw new Error('Could not download Habitly backup');
-    const incoming = await response.json();
-    const localAvatar = state.profile?.avatar || '';
-    state = mergeState(incoming.data || incoming);
-    if (localAvatar && !state.profile.avatar) state.profile.avatar = localAvatar;
-    state.settings.storage = { ...(state.settings.storage || {}), mode: storageMode(), setupCompleted: true };
-    save({ skipDrive: true });
   } catch (e) {
     console.error('Drive login sync failed:', e);
-    toast('Could not load the latest Google Drive data. Your local data was kept.');
   } finally {
-    if (currentAuthUser) driveLoginSyncedUserId = currentAuthUser.id;
     driveLoginSyncBusy = false;
-    driveLoginSyncPending = false;
-    if (currentRoute() !== 'login') render();
+    if (succeeded) {
+      if (currentAuthUser) driveLoginSyncedUserId = currentAuthUser.id;
+      driveLoginSyncPending = false;
+      driveLoginSyncRetryUsed = false;
+      appPhase = 'READY';
+      if (currentRoute() !== 'login') render();
+    } else {
+      scheduleDriveLoginSyncRetry();
+    }
   }
 }
 function connectDrive() {
@@ -1202,7 +1901,7 @@ async function bindDriveSettings(root) {
     if (!googleAccessToken || Date.now() >= googleTokenExpiresAt - 60000) {
       try { await requestDriveToken(''); } catch (_) { return; }
     }
-    await uploadDriveBackup();
+    await uploadDriveBackup({ force: true });
     if (currentRoute() === 'settings') render();
   });
   root.querySelector('#driveRestore')?.addEventListener('click', restoreDriveBackup);
@@ -1212,7 +1911,7 @@ async function bindDriveSettings(root) {
     else if (ensureDriveClient()) requestDriveToken('').catch(() => {});
   }
 }
-async function restoreDriveBackup() { if (!googleAccessToken || Date.now() >= googleTokenExpiresAt - 60000) { try { await requestDriveToken(''); } catch (_) { return; } } const d = driveSettings(); try { const folderId = d.folderId || await findOrCreateDriveFolder(); const file = d.fileId ? { id: d.fileId } : await findDriveBackup(folderId); if (!file) { toast('No Habitly backup found in Google Drive'); return; } const r = await driveRequest(`https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`); if (!r.ok) throw new Error('Could not download backup'); const incoming = await r.json(); modal('Restore Google Drive backup', 'Your current local Habitly data will be replaced by this backup.', `<div class="confirm-box"><p>Backup updated ${esc(formatBackupTime(incoming.updatedAt || file.modifiedTime))}. This restores the complete Habitly state.</p><div class="form-actions"><button class="secondary-btn" data-modal-close>Cancel</button><button class="primary-btn" id="confirmDriveRestore">Restore backup</button></div></div>`); document.getElementById('confirmDriveRestore').addEventListener('click', () => { try { state = mergeState(incoming.data || incoming); save(); closeModal(); render(); toast('Google Drive backup restored'); } catch (e) { toast('Invalid Habitly backup'); } }); } catch (e) { console.error(e); toast('Google Drive restore failed'); } }
+async function restoreDriveBackup() { if (!googleAccessToken || Date.now() >= googleTokenExpiresAt - 60000) { try { await requestDriveToken(''); } catch (_) { return; } } const d = driveSettings(); try { const folderId = await resolveDriveFolder(d.folderId); const file = (await validateDriveBackupFile(d.fileId, folderId)) || await findDriveBackup(folderId); if (!file) { toast('No Habitly backup found in Google Drive'); return; } const r = await driveRequest(`https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`); if (!r.ok) throw new Error('Could not download backup'); const incoming = await r.json(); modal('Restore Google Drive backup', 'Your current local Habitly data will be replaced by this backup.', `<div class="confirm-box"><p>Backup updated ${esc(formatBackupTime(incoming.updatedAt || file.modifiedTime))}. This restores the complete Habitly state.</p><div class="form-actions"><button class="secondary-btn" data-modal-close>Cancel</button><button class="primary-btn" id="confirmDriveRestore">Restore backup</button></div></div>`); document.getElementById('confirmDriveRestore').addEventListener('click', () => { try { state = validateBackupEnvelope(incoming); const activeDrive = driveSettings(); activeDrive.connected = true; activeDrive.folderId = folderId; activeDrive.fileId = file.id; activeDrive.remoteEverSynced = true; activeDrive.lastRemoteUpdatedAt = incoming.updatedAt || file.modifiedTime || ''; resetSyncTracking(state); save({ skipDrive: true, markDirty: false }); closeModal(); render(); toast('Google Drive backup restored'); } catch (e) { toast('Invalid Habitly backup'); } }); } catch (e) { console.error(e); toast('Google Drive restore failed'); } }
 function isStandalone() { return window.matchMedia?.('(display-mode: standalone)').matches || window.navigator.standalone === true; }
 function isIOS() { return /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1); }
 function renderInstallOption(root) {
@@ -1293,9 +1992,9 @@ function initSettings() {
     if (key === 'data') { root.querySelector('#exportBackup')?.addEventListener('click', exportBackup); root.querySelector('#importBackup')?.addEventListener('change', importBackup); root.querySelector('#changeStorage')?.addEventListener('click', changeStorageMode); if (state.settings?.storage?.mode === 'drive' || state.settings?.storage?.mode === 'both') bindDriveSettings(root); }
   }
   function safesettings() { if (!state.settings) state.settings = clone(defaultState.settings); return state.settings; }
-  function confirmClearData() { modal('Clear local data', 'This removes your saved Habitly data from this browser.', `<div class="confirm-box"><p>Your habits, goals, events and settings will be reset to the default Habitly data.</p><div class="form-actions"><button class="secondary-btn" data-modal-close>Cancel</button><button class="danger-btn" id="confirmClearSettings">Clear data</button></div></div>`); root.querySelector('#confirmClearSettings'); document.getElementById('confirmClearSettings').addEventListener('click', () => { localStorage.removeItem(STORAGE); state = clone(defaultState); closeModal(); render(); toast('Local data reset'); }); }
-  function exportBackup() { const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' }), url = URL.createObjectURL(blob), a = document.createElement('a'); a.href = url; a.download = `habitly-backup-${todayISO()}.json`; a.click(); URL.revokeObjectURL(url); toast('Backup exported'); }
-  function importBackup(e) { const f = e.target.files?.[0]; if (!f) return; const r = new FileReader(); r.onload = () => { try { const incoming = JSON.parse(r.result); state = mergeState(incoming); save(); render(); toast('Backup restored'); } catch (err) { toast('Invalid Habitly backup'); } }; r.readAsText(f); }
+  function confirmClearData() { modal('Clear local data', 'This removes your saved Habitly data from this browser.', `<div class="confirm-box"><p>Your habits, goals, events and settings will be cleared from this browser. Google Drive data will not be deleted.</p><div class="form-actions"><button class="secondary-btn" data-modal-close>Cancel</button><button class="danger-btn" id="confirmClearSettings">Clear data</button></div></div>`); document.getElementById('confirmClearSettings').addEventListener('click', () => { if (currentStorageKey) localStorage.removeItem(currentStorageKey); localStorage.removeItem(STORAGE); state = freshUserState(currentAuthUser); closeModal(); render(); toast('Local data cleared'); }); }
+  function exportBackup() { const payload = { backupVersion: 3, app: 'Habitly', accountId: currentAuthUser?.id || '', updatedAt: new Date().toISOString(), data: clone(state) }; const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }), url = URL.createObjectURL(blob), a = document.createElement('a'); a.href = url; a.download = `habitly-backup-${todayISO()}.json`; a.click(); URL.revokeObjectURL(url); toast('Backup exported'); }
+  function importBackup(e) { const f = e.target.files?.[0]; if (!f) return; const r = new FileReader(); r.onload = () => { try { const incoming = JSON.parse(r.result); state = validateBackupEnvelope(incoming); save(); render(); toast('Backup restored'); } catch (err) { toast('Invalid Habitly backup'); } }; r.readAsText(f); }
   root.addEventListener('click', e => { const tab = e.target.closest('[data-settings-tab]'); if (tab) { e.preventDefault(); show(tab.dataset.settingsTab); } });
   show('account');
 }
@@ -1314,7 +2013,7 @@ function habitForm(id) {
       <label class="track-option ${selectedType === 'count' ? 'selected' : ''}"><input type="radio" name="type" value="count" ${selectedType === 'count' ? 'checked' : ''}><b>Count</b><small>Track repetitions</small></label>
     </div>
     <div class="form-grid two" id="habitMeasureFields">
-      <div class="field"><label>Target <span class="target-required">*</span></label><input name="target" type="number" min="1" value="${esc(h?.target ?? '')}" placeholder="e.g. 8"><small class="yesno-help hidden">Yes / No habits automatically use one completion.</small></div>
+      <div class="field"><label>Target <span class="target-required">*</span></label><input name="target" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" value="${esc(h?.target ?? '')}" placeholder="e.g. 8"><small class="yesno-help hidden">Yes / No habits automatically use one completion.</small></div>
       <div class="field"><label>Unit</label><input name="unit" value="${esc(h?.unit || '')}" placeholder="glasses, pages, min"></div>
     </div>
     <div class="form-section"><span class="form-step">03</span><div><strong>Schedule</strong><small>Keep the routine predictable</small></div></div>
@@ -1329,7 +2028,10 @@ function habitForm(id) {
   const unitInput = form.querySelector('[name="unit"]');
   const requiredMark = form.querySelector('.target-required');
   const help = form.querySelector('.yesno-help');
-  const syncTypeUI = () => {
+  let lastQuantityTarget = selectedType === 'yesno' ? '1' : String(h?.target ?? '');
+  let lastQuantityUnit = selectedType === 'yesno' ? '' : String(h?.unit || '');
+  let previousType = selectedType;
+  const syncTypeUI = ({ initial = false } = {}) => {
     const type = form.querySelector('[name="type"]:checked')?.value || 'quantity';
     form.querySelectorAll('.track-option').forEach(x => x.classList.toggle('selected', x.querySelector('input')?.checked));
     const yesno = type === 'yesno';
@@ -1339,21 +2041,66 @@ function habitForm(id) {
     unitInput.disabled = yesno;
     requiredMark.classList.toggle('hidden', yesno);
     help.classList.toggle('hidden', !yesno);
-    if (yesno) { targetInput.value = '1'; unitInput.value = 'completion'; }
-    else if (unitInput.value === 'completion' && h?.type === 'yesno') unitInput.value = '';
+
+    // Only the tracking-type change is allowed to replace Target. Never
+    // rewrite a user-entered multi-digit value while the form is being edited.
+    if (yesno) {
+      if (previousType !== 'yesno') {
+        lastQuantityTarget = targetInput.value;
+        lastQuantityUnit = unitInput.value;
+      }
+      targetInput.value = '1';
+      unitInput.value = 'completion';
+    } else if (previousType === 'yesno' || (initial && h?.type === 'yesno')) {
+      targetInput.value = lastQuantityTarget || '1';
+      unitInput.value = lastQuantityUnit || '';
+    }
+    previousType = type;
   };
-  form.querySelectorAll('[name="type"]').forEach(r => r.addEventListener('change', syncTypeUI));
-  syncTypeUI();
+  form.querySelectorAll('[name="type"]').forEach(r => r.addEventListener('change', () => syncTypeUI()));
+  syncTypeUI({ initial: true });
+
+  // Keep numeric target input stable while typing. The value is validated once
+  // on submit instead of being coerced on every keystroke.
+  // Do not coerce the value while the user is entering it. In particular,
+  // never run Number()/Math.max() from an input event: doing that can turn
+  // an in-progress multi-digit edit into a different value. Validation is
+  // performed exactly once when Save Changes is submitted.
+  targetInput.addEventListener('beforeinput', e => {
+    if (targetInput.disabled) return;
+    if (e.inputType === 'insertText' && e.data && /[^0-9]/.test(e.data)) e.preventDefault();
+  });
+  targetInput.addEventListener('paste', e => {
+    if (targetInput.disabled) return;
+    const text = (e.clipboardData?.getData('text') || '').replace(/\D/g, '');
+    if (!text) { e.preventDefault(); return; }
+    e.preventDefault();
+    const start = targetInput.selectionStart ?? targetInput.value.length;
+    const end = targetInput.selectionEnd ?? start;
+    targetInput.setRangeText(text, start, end, 'end');
+  });
 
   form.addEventListener('submit', e => {
     e.preventDefault();
     const fd = new FormData(form);
     const type = String(fd.get('type') || 'quantity');
-    const target = type === 'yesno' ? 1 : Math.max(1, Number(fd.get('target')) || 1);
+    const rawTarget = String(fd.get('target') ?? '').trim();
+    if (type !== 'yesno' && !/^\d+$/.test(rawTarget)) { toast('Enter a valid whole-number target'); targetInput.focus(); return; }
+    const target = type === 'yesno' ? 1 : Math.max(1, Number(rawTarget));
     const unit = type === 'yesno' ? 'completion' : (String(fd.get('unit') || '').trim() || 'times');
     if (id) {
-      Object.assign(h, { name: String(fd.get('name')).trim(), category: fd.get('category'), emoji: String(fd.get('emoji') || '').trim(), type, target, unit, frequency: fd.get('frequency'), paused: fd.get('paused') === 'on' });
+      const today = todayISO();
+      const hasTodayRecord = Object.prototype.hasOwnProperty.call(h.daily || {}, today);
+      Object.assign(h, { name: String(fd.get('name')).trim(), category: fd.get('category'), emoji: String(fd.get('emoji') || '').trim(), type, target, unit, frequency: fd.get('frequency'), paused: fd.get('paused') === 'on', updatedAt: new Date().toISOString() });
       h.current = Math.min(Number(h.current) || 0, target);
+      // If today's progress actually exists, keep the authoritative daily
+      // record in sync with a reduced target. Otherwise do not create one.
+      if (hasTodayRecord) {
+        h.daily = h.daily || {};
+        h.dailyUpdatedAt = h.dailyUpdatedAt || {};
+        h.daily[today] = h.current;
+        h.dailyUpdatedAt[today] = new Date().toISOString();
+      }
     } else {
       state.habits.push({ id: uid('h'), name: String(fd.get('name')).trim(), emoji: String(fd.get('emoji') || '').trim(), category: fd.get('category'), type, target, current: 0, unit, paused: false, created: Date.now(), frequency: fd.get('frequency') });
     }
@@ -1419,14 +2166,22 @@ function currentRoute() {
 function maybeAutoBackupOnOpen() {
   const mode = storageMode();
   const d = driveSettings();
-  if (!currentAuthUser || !storageIsConfigured() || (mode !== 'drive' && mode !== 'both') || !d.connected || d.autoDaily === false || d.lastBackupDate === todayISO()) return;
-  const run = () => { if (!googleAccessToken) return; uploadDriveBackup(); };
+  // driveLoginSyncPending being true means the post-login pull-from-Drive
+  // hasn't finished yet (or failed and is waiting on a safe retry). Uploading
+  // here first would overwrite the real Drive backup with a stale/unmerged
+  // local copy, so this waits for that sync to settle instead.
+  if (!currentAuthUser || !storageIsConfigured() || (mode !== 'drive' && mode !== 'both') || !d.connected || d.autoDaily === false || d.lastBackupDate === todayISO() || driveLoginSyncPending) return;
+  const run = () => { if (!googleAccessToken || driveLoginSyncPending) return; uploadDriveBackup(); };
   if (googleAccessToken) setTimeout(run, 400);
   else if (ensureDriveClient()) { try { googleTokenClient.requestAccessToken({ prompt: '' }); } catch (e) { console.warn('Automatic Drive authorization unavailable:', e); } }
 }
 function render() {
   const raw = location.hash.replace(/^#\//, '');
   const route = ROUTES.includes(raw) ? raw : 'dashboard';
+  if (appPhase === 'DRIVE_RESTORING' && currentAuthUser && route !== 'login') {
+    document.getElementById('app').innerHTML = `<div class="drive-restoring-screen"><div class="drive-restoring-spinner" aria-hidden="true"></div><p>Restoring your Habitly data from Google Drive…</p></div>`;
+    return;
+  }
   document.getElementById('app').innerHTML = pageContent(route);
   bindCommon();
   if (route === 'habits') { renderHabitCards(); bindHabitPage(); }
@@ -1529,6 +2284,19 @@ function confirmDelete(kind, id) {
     const index = collection.findIndex(x => x.id === id);
     if (index < 0) return;
     const deleted = clone(collection[index]);
+    if (kind === 'habit') {
+      state.syncMeta = state.syncMeta || clone(defaultState.syncMeta);
+      state.syncMeta.deleted = state.syncMeta.deleted || clone(defaultState.syncMeta.deleted);
+      state.syncMeta.deleted.habits = state.syncMeta.deleted.habits || {};
+      state.syncMeta.deleted.habits[id] = new Date().toISOString();
+      // A deleted habit cannot keep an orphaned manual reminder alive.
+      state.reminders = state.reminders.filter(r => r.habitId !== id);
+    } else {
+      state.syncMeta = state.syncMeta || clone(defaultState.syncMeta);
+      state.syncMeta.deleted = state.syncMeta.deleted || clone(defaultState.syncMeta.deleted);
+      state.syncMeta.deleted.goals = state.syncMeta.deleted.goals || {};
+      state.syncMeta.deleted.goals[id] = new Date().toISOString();
+    }
     collection.splice(index, 1);
     save();
     closeModal();
@@ -1539,6 +2307,8 @@ function confirmDelete(kind, id) {
       if (!pending || pending.deleted.id !== deleted.id || pending.kind !== kind) return;
       const target = kind === 'goal' ? state.goals : state.habits;
       if (!target.some(x => x.id === deleted.id)) target.splice(Math.min(index, target.length), 0, clone(deleted));
+      const tombstones = state.syncMeta?.deleted?.[kind === 'goal' ? 'goals' : 'habits'];
+      if (tombstones) delete tombstones[deleted.id];
       pendingUndo = null;
       save();
       render();
@@ -1550,47 +2320,134 @@ function confirmDelete(kind, id) {
 
 window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); deferredInstallPrompt = e; if (currentRoute() === 'settings') render(); });
 window.addEventListener('appinstalled', () => { deferredInstallPrompt = null; if (currentRoute() === 'settings') render(); toast('Habitly installed successfully'); });
-if ('serviceWorker' in navigator) { window.addEventListener('load', () => navigator.serviceWorker.register('./service-worker.js').catch(e => console.warn('Habitly service worker registration failed', e))); }
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', async () => {
+    try {
+      const registration = await navigator.serviceWorker.register('./service-worker.js', {
+        updateViaCache: 'none'
+      });
+      await registration.update();
+    } catch (e) {
+      console.warn('Habitly service worker registration failed', e);
+    }
+  });
+}
+
+async function handleAuthenticatedUser(nextUser) {
+  state = loadStateForUser(nextUser);
+  resetSyncTracking(state);
+  if (!state.profile.email) state.profile.email = nextUser.email || '';
+  if (nextUser.user_metadata?.habitly_storage_setup && nextUser.user_metadata?.habitly_storage_mode) {
+    state.settings.storage = { mode: nextUser.user_metadata.habitly_storage_mode, setupCompleted: true };
+  }
+  const mode = nextUser.user_metadata?.habitly_storage_mode || state.settings?.storage?.mode;
+  if ((mode === 'drive' || mode === 'both') && state.settings?.storage?.setupCompleted) {
+    appPhase = 'DRIVE_RESTORING';
+    driveLoginSyncPending = true;
+    driveLoginSyncRetryUsed = false;
+    driveLoginSyncWaitAttempts = 0;
+    clearTimeout(driveLoginSyncRetryTimer);
+    setTimeout(attemptDriveLoginSync, 300);
+  } else {
+    appPhase = 'READY';
+    if (location.hash !== '#/login') render();
+  }
+}
+
+function clearAuthenticatedState() {
+  clearTimeout(driveBackupTimer);
+  clearTimeout(driveLoginSyncRetryTimer);
+  clearTimeout(driveSyncRetryTimer);
+  driveBackupTimer = null;
+  driveLoginSyncRetryTimer = null;
+  driveSyncRetryTimer = null;
+  driveLoginSyncPending = false;
+  driveLoginSyncBusy = false;
+  driveLoginSyncedUserId = '';
+  driveLoginSyncRetryUsed = false;
+  driveLoginSyncWaitAttempts = 0;
+  driveSyncRetryCount = 0;
+  driveUploadQueued = false;
+  googleDriveBusy = false;
+  googleAccessToken = '';
+  googleTokenExpiresAt = 0;
+  driveRemoteMissing = false;
+  driveLastKnownRemoteModifiedAt = '';
+  driveLastSyncCheckAt = 0;
+  currentAuthUser = null;
+  currentStorageKey = '';
+  syncBaseState = null;
+  syncLastSavedSnapshot = null;
+  syncGeneration = 0;
+  syncDirty = { habits:false, goals:false, events:false, reminders:false, profile:false, settings:false, activityHistory:false };
+  state = freshUserState(null);
+  appPhase = 'READY';
+  closeModal();
+  closeDrawer();
+  if (location.hash !== '#/login') history.replaceState(null, '', '#/login');
+  document.getElementById('app').innerHTML = '';
+}
+
+if (typeof window !== 'undefined') {
+  window.__habitlyTestHooks = {
+    setState: next => { state = normalizeState(clone(next)); },
+    getState: () => clone(state)
+  };
+}
 
 async function bootstrapApp() {
-  if (window.habitlySupabase) {
-    try {
-      const { data } = await window.habitlySupabase.auth.getSession();
-      if (data?.session?.user) {
-        state = loadStateForUser(data.session.user);
-        if (!state.profile.email) state.profile.email = data.session.user.email || '';
-        if (data.session.user.user_metadata?.habitly_storage_setup && data.session.user.user_metadata?.habitly_storage_mode) { state.settings.storage = { mode: data.session.user.user_metadata.habitly_storage_mode, setupCompleted: true }; }
-        const mode = data.session.user.user_metadata?.habitly_storage_mode || state.settings?.storage?.mode;
-        if ((mode === 'drive' || mode === 'both') && state.settings?.storage?.setupCompleted) {
-          driveLoginSyncPending = true;
-          setTimeout(() => { if (ensureDriveClient()) requestDriveToken('').catch(() => { driveLoginSyncPending = false; }); }, 300);
-        }
+  const sb = window.habitlySupabase;
+  if (sb) {
+    window.addEventListener('habitly-auth-state', event => {
+      const { event: authEvent, session } = event.detail || {};
+      const nextUser = session?.user || null;
+      const nextId = nextUser?.id || '';
+      const currentId = currentAuthUser?.id || '';
+
+      if (authEvent === 'SIGNED_OUT') {
+        clearAuthenticatedState();
+        return;
       }
-    } catch (e) { console.error('Habitly session bootstrap failed:', e); }
-    window.habitlySupabase.auth.onAuthStateChange((event, session) => {
-      const nextUser = session?.user || null, nextId = nextUser?.id || '';
-      if (nextId !== (currentAuthUser?.id || '')) {
-        driveLoginSyncedUserId = '';
-        driveLoginSyncPending = false;
-        if (!nextUser) { googleAccessToken = ''; googleTokenExpiresAt = 0; }
-        state = nextUser ? loadStateForUser(nextUser) : normalizeState(clone(defaultState));
-        if (nextUser && !state.profile.email) state.profile.email = nextUser.email || '';
-        if (nextUser?.user_metadata?.habitly_storage_setup && nextUser?.user_metadata?.habitly_storage_mode) {
-          state.settings.storage = { mode: nextUser.user_metadata.habitly_storage_mode, setupCompleted: true };
-        }
-        if (nextUser) {
-          const mode = nextUser.user_metadata?.habitly_storage_mode || state.settings?.storage?.mode;
-          if ((mode === 'drive' || mode === 'both') && state.settings?.storage?.setupCompleted) {
-            driveLoginSyncPending = true;
-            if (ensureDriveClient()) requestDriveToken('').catch(() => { driveLoginSyncPending = false; });
-          } else if (location.hash !== '#/login') render();
-        }
+      if (!nextUser || nextId === currentId) return;
+      if (authEvent === 'TOKEN_REFRESHED') return;
+      if (authEvent === 'PASSWORD_RECOVERY') return;
+      if (authEvent === 'INITIAL_SESSION' || authEvent === 'SIGNED_IN' || authEvent === 'USER_UPDATED') {
+        handleAuthenticatedUser(nextUser).catch(error => {
+          console.error('Habitly authenticated-state bootstrap failed:', error);
+          appPhase = 'READY';
+          render();
+        });
       }
     });
+
+    try {
+      const { data, error } = await sb.auth.getSession();
+      if (error) throw error;
+      if (data?.session?.user) await handleAuthenticatedUser(data.session.user);
+      else clearAuthenticatedState();
+    } catch (e) {
+      console.error('Habitly session bootstrap failed:', e);
+      clearAuthenticatedState();
+    }
+  } else {
+    clearAuthenticatedState();
   }
-  if (!location.hash) location.hash = '/dashboard';
+  if (!location.hash) location.hash = currentAuthUser ? '/dashboard' : '/login';
   render();
 }
+
+let lastDriveVisibilitySyncAt = 0;
+window.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible' || !currentAuthUser || !driveStorageSelected()) return;
+  const now = Date.now();
+  if (now - lastDriveVisibilitySyncAt < 15000 || driveLoginSyncBusy || driveLoginSyncPending) return;
+  lastDriveVisibilitySyncAt = now;
+  // A visible app may have been changed on another device. Pull the latest
+  // backup before allowing the normal local-to-Drive sync cycle to continue.
+  if (googleAccessToken && Date.now() < googleTokenExpiresAt - 60000) {
+    syncDriveOnLogin({ refresh: true }).catch(e => console.warn('Drive visibility sync skipped:', e));
+  }
+});
 window.addEventListener('hashchange', () => { closeModal(); closeDrawer(); render(); });
 bootstrapApp();
 /* =========================
