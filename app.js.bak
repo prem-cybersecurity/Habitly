@@ -2,7 +2,7 @@
    Dashboard / Habits / Goals / Calendar / Statistics
 */
 const AS = 'assets/';
-const APP_VERSION = '2.3.0';
+const APP_VERSION = '2.1.0';
 const ROUTES = ['dashboard', 'habits', 'goals', 'calendar', 'statistics', 'settings'];
 const STORAGE = 'habitly.final.v2';
 const USER_STORAGE_PREFIX = 'habitly.final.v3.user.';
@@ -69,7 +69,6 @@ let cloudHydrationGeneration = 0;
 let cloudHydrationConfirmedUserId = '';
 let reminderSchedulerTimer = null;
 let reminderUiTimer = null;
-let headerClockTimer = null;
 let lastReminderSweepKey = "";
 
 const defaultState = {
@@ -90,7 +89,7 @@ const defaultState = {
   reminders: [],
   profile: { name: '', email: '', avatar: '' },
   activityHistory: {},
-  syncMeta: { deleted: { habits: {}, goals: {}, events: {}, reminders: {} }, recordVersions: { habits: {}, goals: {}, events: {}, reminders: {} }, pending: { habits: false, goals: false, events: false, reminders: false, profile: false, settings: false, activityHistory: false }, mutations: [] },
+  syncMeta: { deleted: { habits: {}, goals: {}, events: {}, reminders: {} }, pending: { habits: false, goals: false, events: false, reminders: false, profile: false, settings: false, activityHistory: false }, mutations: [] },
   settings: {
     timeFormat: '12h',
     notifications: { daily: true, motivational: true, weekly: true, goal: true },
@@ -168,7 +167,6 @@ function mergeState(saved, options = {}) {
     activityHistory: saved.activityHistory && typeof saved.activityHistory === 'object' ? saved.activityHistory : {},
     syncMeta: saved.syncMeta && typeof saved.syncMeta === 'object' ? {
       deleted: { habits: { ...(saved.syncMeta.deleted?.habits || {}) }, goals: { ...(saved.syncMeta.deleted?.goals || {}) }, events: { ...(saved.syncMeta.deleted?.events || {}) }, reminders: { ...(saved.syncMeta.deleted?.reminders || {}) } },
-      recordVersions: { habits: { ...(saved.syncMeta.recordVersions?.habits || {}) }, goals: { ...(saved.syncMeta.recordVersions?.goals || {}) }, events: { ...(saved.syncMeta.recordVersions?.events || {}) }, reminders: { ...(saved.syncMeta.recordVersions?.reminders || {}) } },
       pending: { ...defaultState.syncMeta.pending, ...(saved.syncMeta.pending || {}) },
       mutations: preserveMutations && Array.isArray(saved.syncMeta.mutations) ? clone(saved.syncMeta.mutations) : [],
       cloudRevision: Number(saved.syncMeta.cloudRevision) || 0,
@@ -201,8 +199,6 @@ function normalizeState(s) {
   out.profile = out.profile && typeof out.profile === 'object' ? { ...clone(defaultState.profile), ...out.profile } : clone(defaultState.profile);
   out.syncMeta = out.syncMeta && typeof out.syncMeta === 'object' ? out.syncMeta : clone(defaultState.syncMeta);
   out.syncMeta.deleted = out.syncMeta.deleted && typeof out.syncMeta.deleted === 'object' ? out.syncMeta.deleted : clone(defaultState.syncMeta.deleted);
-  out.syncMeta.recordVersions = out.syncMeta.recordVersions && typeof out.syncMeta.recordVersions === 'object' ? out.syncMeta.recordVersions : clone(defaultState.syncMeta.recordVersions);
-  for (const key of ['habits','goals','events','reminders']) out.syncMeta.recordVersions[key] = out.syncMeta.recordVersions[key] && typeof out.syncMeta.recordVersions[key] === 'object' ? out.syncMeta.recordVersions[key] : {};
   for (const key of ['habits','goals','events','reminders']) out.syncMeta.deleted[key] = out.syncMeta.deleted[key] && typeof out.syncMeta.deleted[key] === 'object' ? out.syncMeta.deleted[key] : {};
   out.syncMeta.pending = out.syncMeta.pending && typeof out.syncMeta.pending === 'object' ? { ...defaultState.syncMeta.pending, ...out.syncMeta.pending } : { ...defaultState.syncMeta.pending };
   out.syncMeta.mutations = Array.isArray(out.syncMeta.mutations) ? out.syncMeta.mutations.filter(m => m && typeof m === 'object' && ['habits','goals','events','reminders','profile','settings','activityHistory'].includes(m.kind) && ['upsert','delete','replace'].includes(m.op) && m.at) : [];
@@ -326,80 +322,40 @@ function appendSyncMutations(previous, current) {
     .map(x => x.mutation);
 }
 function pendingMutations(s) { return Array.isArray(s?.syncMeta?.mutations) ? s.syncMeta.mutations : []; }
-function dirtyFromMutationList(mutations = []) {
-  const dirty = { habits:false, goals:false, events:false, reminders:false, profile:false, settings:false, activityHistory:false };
-  for (const m of mutations) if (dirty[m.kind] !== undefined) dirty[m.kind] = true;
-  return dirty;
-}
-function getRemoteRecordVersion(remoteState, kind, recordId) {
-  return Number(remoteState?.syncMeta?.recordVersions?.[kind]?.[recordId]?.revision || 0);
-}
-function getRemoteRecordOwner(remoteState, kind, recordId) {
-  return String(remoteState?.syncMeta?.recordVersions?.[kind]?.[recordId]?.deviceId || '');
-}
-function findRecordById(source, kind, id) {
-  return (source?.[kind] || []).find(x => x?.id === id) || null;
-}
-function mutationConflictsWithRemote(remoteState, mutation, baseState) {
-  if (!['habits','goals','events','reminders'].includes(mutation?.kind)) return false;
-  const id = mutation.recordId || mutation.record?.id;
-  if (!id) return false;
-  const baseRevision = Number(mutation.baseRevision) || 0;
-  const remoteVersion = getRemoteRecordVersion(remoteState, mutation.kind, id);
-  const remoteOwner = getRemoteRecordOwner(remoteState, mutation.kind, id);
-  const localDevice = String(mutation.deviceId || '');
-
-  // A newer server version from this same device is an earlier mutation from
-  // this browser. It must not suppress a newer local edit that was queued
-  // before the browser observed its own acknowledgement.
-  if (remoteVersion > baseRevision && remoteOwner && localDevice && remoteOwner === localDevice) return false;
-
-  if (remoteVersion > baseRevision) return true;
-
-  // Legacy cloud documents do not have per-record server versions. Fall back
-  // conservatively to the local synchronization baseline: if the same record
-  // changed remotely after the baseline, do not let a stale pending mutation
-  // overwrite it.
-  if (Object.prototype.hasOwnProperty.call(mutation, 'baseRevision') && baseRevision > 0 && !remoteVersion && baseState) {
-    const remoteRecord = findRecordById(remoteState, mutation.kind, id);
-    const baseRecord = findRecordById(baseState, mutation.kind, id);
-    if (remoteRecord && baseRecord && JSON.stringify(remoteRecord) !== JSON.stringify(baseRecord)) return true;
-  }
-  return false;
-}
-function applyMutationJournal(remoteState, localState, mutations, baseState = null) {
+function applyMutationJournal(remoteState, localState, mutations) {
   const merged = normalizeState(mergeState(remoteState || {}, { preserveMutations: false }));
   const local = normalizeState(clone(localState || {}));
   const tomb = merged.syncMeta?.deleted || (merged.syncMeta.deleted = { habits:{}, goals:{}, events:{}, reminders:{} });
   for (const kind of ['habits','goals','events','reminders']) tomb[kind] = tomb[kind] || {};
-  const conflicts = [];
-  // Pending local mutations are NEVER discarded merely because another device
-  // committed a newer server revision. The revision is a compare-and-swap
-  // guard for the write, not a reason to throw away an explicit user action.
-  // On a CAS conflict we refetch the newest remote state, rebase the complete
-  // pending journal on top of it, and retry. This gives us deterministic
-  // server-commit ordering without trusting phone/laptop clocks and, crucially,
-  // prevents legitimate offline edits from silently disappearing.
   for (const m of [...(mutations || [])].sort((a,b)=>recordTime(a.at)-recordTime(b.at))) {
     if (['habits','goals','events','reminders'].includes(m.kind)) {
       const list = Array.isArray(merged[m.kind]) ? merged[m.kind] : [];
       if (m.op === 'delete') {
+        // This mutation is still unacknowledged by the server. It therefore
+        // represents the newest user action known to this device and must not
+        // be rejected just because another device's wall clock is later.
         merged[m.kind] = list.filter(x=>x.id!==m.recordId);
         tomb[m.kind][m.recordId] = m.at || new Date().toISOString();
       } else if (m.op === 'upsert' && m.record?.id) {
+        // IMPORTANT: pending local mutations are applied over the fetched cloud
+        // revision. The previous implementation compared client timestamps
+        // here, so a phone with a skewed clock could lose a valid edit to a
+        // laptop value (or vice versa). Server revision/CAS determines which
+        // device commits next; while a mutation is pending, its local value must
+        // remain intact.
         const filtered = list.filter(x=>x.id!==m.record.id);
         filtered.push(clone(m.record));
         merged[m.kind] = filtered;
         if (tomb[m.kind][m.record.id]) delete tomb[m.kind][m.record.id];
       }
     } else if (m.kind === 'profile' || m.kind === 'settings') {
+      // Same rule for singleton state: never let a remote wall-clock timestamp
+      // discard a still-pending local user action.
       if (m.record) merged[m.kind] = clone(m.record);
     } else if (m.kind === 'activityHistory' && m.record) {
       merged.activityHistory = { ...(merged.activityHistory || {}), ...(m.record || {}) };
     }
   }
-  merged.syncMeta = merged.syncMeta || clone(defaultState.syncMeta);
-  merged.syncMeta.conflictedMutations = conflicts;
   return normalizeState(merged);
 }
 
@@ -528,7 +484,7 @@ function adoptRemoteWithPending(remoteState, localState, baseOverride = syncBase
 function mergeForDriveUpload(remoteState, localState, dirtyOverride = syncDirty, baseOverride = syncBaseState) {
   const local = normalizeState(clone(localState || {}));
   const mutations = pendingMutations(local);
-  if (mutations.length) return applyMutationJournal(remoteState, local, mutations, baseOverride || syncBaseState);
+  if (mutations.length) return applyMutationJournal(remoteState, local, mutations);
   const remote = mergeState(remoteState || {}, { preserveMutations: false });
   const dirty = dirtyOverride || syncDirty;
   const base = baseOverride || syncBaseState;
@@ -571,25 +527,16 @@ function save(options = {}) {
 
 function cloudStorageSelected() {
   const mode = storageMode();
-  // Google Drive mode is intentionally Drive-authoritative.
-  // Supabase is the active realtime authority only for the explicit
-  // "This device + Google Drive" mode. This keeps the UI promise of the
-  // Google Drive storage option honest and prevents an unavailable/missing
-  // Supabase sync table from silently blocking Drive synchronization.
-  return !!currentAuthUser && storageIsConfigured() && mode === 'both' && !!window.habitlySupabase;
+  return !!currentAuthUser && storageIsConfigured() && (mode === 'drive' || mode === 'both') && !!window.habitlySupabase;
 }
 function ensureCloudDeviceId() {
   if (cloudDeviceId) return cloudDeviceId;
   const key = 'habitly.cloud.device.id';
   try {
-    // sessionStorage gives each open tab/window its own writer identity while
-    // surviving normal page navigations/reloads. This prevents two tabs on the
-    // same laptop from masquerading as one writer during conflict resolution.
-    const session = window.sessionStorage;
-    cloudDeviceId = session?.getItem(key) || '';
+    cloudDeviceId = localStorage.getItem(key) || '';
     if (!cloudDeviceId) {
       cloudDeviceId = `d_${uid('device')}_${Math.random().toString(36).slice(2,10)}`;
-      session?.setItem(key, cloudDeviceId);
+      localStorage.setItem(key, cloudDeviceId);
     }
   } catch (_) { cloudDeviceId = `d_${uid('device')}_${Math.random().toString(36).slice(2,10)}`; }
   return cloudDeviceId;
@@ -606,38 +553,13 @@ function cloudStatusText() {
   }
   return cloudSyncAvailable ? 'Ready to sync' : 'Sync unavailable — local data is safe';
 }
-function cloudDocumentState(source = state, revisionOverride = cloudRevision, committedMutations = []) {
+function cloudDocumentState(source = state) {
   const doc = normalizeState(clone(source || {}));
   doc.syncMeta = doc.syncMeta || clone(defaultState.syncMeta);
   doc.syncMeta.mutations = [];
   doc.syncMeta.pending = { ...defaultState.syncMeta.pending };
-  doc.syncMeta.cloudRevision = Number(revisionOverride) || 0;
+  doc.syncMeta.cloudRevision = cloudRevision;
   doc.syncMeta.cloudDeviceId = ensureCloudDeviceId();
-  doc.syncMeta.recordVersions = doc.syncMeta.recordVersions || clone(defaultState.syncMeta.recordVersions);
-  for (const kind of ['habits','goals','events','reminders']) {
-    doc.syncMeta.recordVersions[kind] = { ...(doc.syncMeta.recordVersions[kind] || {}) };
-  }
-  const committedRevision = Number(revisionOverride) || 0;
-  for (const m of committedMutations || []) {
-    if (!m) continue;
-    const id = m.recordId || m.record?.id;
-    if (['habits','goals','events','reminders'].includes(m.kind) && id && committedRevision > 0) {
-      doc.syncMeta.recordVersions[m.kind][id] = {
-        revision: committedRevision,
-        deviceId: String(m.deviceId || ensureCloudDeviceId()),
-        mutationId: String(m.id || '')
-      };
-    }
-  }
-  // On first creation there is no mutation journal to stamp. Give existing
-  // records a server version so future stale-device writes can be detected.
-  if (committedRevision === 1) {
-    for (const kind of ['habits','goals','events','reminders']) {
-      for (const item of doc[kind] || []) if (item?.id && !doc.syncMeta.recordVersions[kind][item.id]) {
-        doc.syncMeta.recordVersions[kind][item.id] = { revision: 1, deviceId: ensureCloudDeviceId(), mutationId: 'initial-state' };
-      }
-    }
-  }
   return createSyncSnapshot(doc);
 }
 function validateCloudDocument(row) {
@@ -657,15 +579,14 @@ async function fetchCloudDocument() {
 }
 async function createCloudDocument(initialState) {
   const sb = window.habitlySupabase;
-  const payload = { user_id: currentAuthUser.id, revision: 1, state: cloudDocumentState(initialState, 1, []), updated_at: new Date().toISOString(), updated_by: ensureCloudDeviceId() };
+  const payload = { user_id: currentAuthUser.id, revision: 1, state: cloudDocumentState(initialState), updated_at: new Date().toISOString(), updated_by: ensureCloudDeviceId() };
   const { data, error } = await sb.from(CLOUD_TABLE).insert(payload).select('user_id,revision,state,updated_at,updated_by').single();
   if (error) throw error;
   return data;
 }
-async function updateCloudDocument(expectedRevision, nextState, committedMutations = []) {
+async function updateCloudDocument(expectedRevision, nextState) {
   const sb = window.habitlySupabase;
-  const nextRevision = Number(expectedRevision) + 1;
-  const payload = { revision: nextRevision, state: cloudDocumentState(nextState, nextRevision, committedMutations), updated_at: new Date().toISOString(), updated_by: ensureCloudDeviceId() };
+  const payload = { revision: Number(expectedRevision) + 1, state: cloudDocumentState(nextState), updated_at: new Date().toISOString(), updated_by: ensureCloudDeviceId() };
   const { data, error } = await sb.from(CLOUD_TABLE).update(payload).eq('user_id', currentAuthUser.id).eq('revision', expectedRevision).select('user_id,revision,state,updated_at,updated_by').maybeSingle();
   if (error) throw error;
   if (!data) { const conflict = new Error('Cloud revision conflict'); conflict.code = 'CLOUD_CONFLICT'; throw conflict; }
@@ -740,16 +661,7 @@ async function flushCloudSync() {
       const localSnapshot = normalizeState(clone(state));
       const mutationSnapshot = clone(pendingMutations(localSnapshot));
       if (!mutationSnapshot.length) break;
-
-      // Rebase every still-pending user mutation on the newest remote snapshot.
-      // The server revision is the CAS guard; it is NOT a conflict winner.
-      // Therefore an offline/local edit remains pending until a successful
-      // server commit instead of being silently discarded when another device
-      // changed the same record first.
-      const effectiveMutations = mutationSnapshot;
-      localSnapshot.syncMeta.mutations = effectiveMutations;
-      localSnapshot.syncMeta.pending = dirtyFromMutationList(effectiveMutations);
-      const merged = mergeForDriveUpload(remoteState, localSnapshot, dirtyFromMutationList(effectiveMutations), syncBaseState);
+      const merged = mergeForDriveUpload(remoteState, localSnapshot, dirtyFromMutations(), syncBaseState);
       if (isSuspiciousEmptySync(localSnapshot, remoteState, mutationSnapshot)) {
         // Remote may be empty because of corruption or a stale/partial write.
         // Merge will preserve explicit local mutations; an unexplained empty
@@ -757,7 +669,7 @@ async function flushCloudSync() {
         throw new Error('Sync safety guard: refusing an unexplained empty cloud overwrite');
       }
       let write;
-      try { write = await updateCloudDocument(Number(remote.revision), merged, effectiveMutations); }
+      try { write = await updateCloudDocument(Number(remote.revision), merged); }
       catch (e) {
         if (e?.code !== 'CLOUD_CONFLICT') throw e;
         remote = await fetchCloudDocument();
@@ -765,13 +677,10 @@ async function flushCloudSync() {
         continue;
       }
       cloudRevision = Number(write.revision);
-      const committedState = validateCloudDocument(write);
       const liveMutations = pendingMutations(state);
-      const acknowledged = new Set(effectiveMutations.map(m => m.id));
+      const acknowledged = new Set(mutationSnapshot.map(m => m.id));
       if (flushGeneration === syncGeneration) {
-        const liveAvatar = state.profile?.avatar || '';
-        state = normalizeState(committedState);
-        if (liveAvatar && !state.profile.avatar) state.profile.avatar = liveAvatar;
+        state = normalizeState(merged);
         state.syncMeta.mutations = liveMutations.filter(m => !acknowledged.has(m.id));
         state.syncMeta.pending = dirtyFromMutations();
         state.syncMeta.cloudRevision = cloudRevision;
@@ -787,7 +696,6 @@ async function flushCloudSync() {
         live.syncMeta.mutations = liveMutations.filter(m => !acknowledged.has(m.id));
         live.syncMeta.pending = dirtyFromMutations();
         live.syncMeta.cloudRevision = cloudRevision;
-        live.syncMeta.recordVersions = clone(committedState.syncMeta?.recordVersions || live.syncMeta.recordVersions || defaultState.syncMeta.recordVersions);
         state = normalizeState(live);
         if (currentStorageKey) localStorage.setItem(currentStorageKey, JSON.stringify(state));
         cloudSyncPending = pendingMutations(state).length > 0;
@@ -893,9 +801,8 @@ function driveStorageSelected() {
 
 function scheduleDriveBackup() {
   if (!driveStorageSelected() || driveSettings().autoDaily === false || driveLoginSyncPending || driveLoginSyncBusy) return;
-  // In Drive storage mode, Drive is the active synchronization authority.
-  // In Both mode, Supabase is primary and Drive only receives acknowledged
-  // cloud snapshots. Never let an unavailable Supabase table block Drive mode.
+  // Supabase is the active synchronization authority. Drive is a downstream
+  // backup and must never upload the browser's working copy on its own.
   if (cloudStorageSelected() && !cloudSyncAvailable) return;
   // Never upload a possibly stale local cache until this account has completed
   // a successful Drive reconciliation for the current login.
@@ -987,14 +894,6 @@ function formatTime(value) {
   if (userTimeFormat() === '24h') return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`;
   const ap = h >= 12 ? 'PM' : 'AM', hh = h % 12 || 12;
   return `${hh}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')} ${ap}`;
-}
-function formatTimeShort(value) {
-  const t = parseTime24(value);
-  if (!t) return String(value || '');
-  const [h,m] = t.split(':').map(Number);
-  if (userTimeFormat() === '24h') return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
-  const ap = h >= 12 ? 'PM' : 'AM', hh = h % 12 || 12;
-  return `${hh}:${String(m).padStart(2,'0')} ${ap}`;
 }
 function formatDateTime(dateValue, timeValue) {
   return `${formatDate(dateValue)} · ${formatTime(timeValue)}`;
@@ -1311,8 +1210,6 @@ function checkReminderNotifications(force = false) {
 }
 function startReminderService() {
   clearInterval(reminderUiTimer);
-  clearInterval(headerClockTimer);
-  headerClockTimer = null;
   clearTimeout(reminderSchedulerTimer);
   reminderUiTimer = setInterval(() => { checkReminderNotifications(); refreshReminderUi(); }, 10000);
   checkReminderNotifications(true);
@@ -1437,7 +1334,8 @@ function formatReminderTime(value) {
   if (!value) return 'No time';
   const [h, m] = String(value).split(':').map(Number);
   if (!Number.isFinite(h) || !Number.isFinite(m)) return String(value);
-  return formatTimeShort(value);
+  const d = new Date(2000, 0, 1, h, m);
+  return formatTime(value);
 }
 function reminderSoundLabel(value) {
   return ({ gentle:'Gentle Bell', chime:'Soft Chime', calm:'Calm', classic:'Classic', simple:'Simple', bright:'Bright', marimba:'Marimba', digital:'Digital', none:'No Sound' }[value] || 'Gentle Bell');
@@ -1561,7 +1459,7 @@ function reminderSectionMarkup(title, items, emptyText, options = {}) {
         : `data-route="calendar"`;
       return `<button class="reminder-item ${editable ? 'is-habit-reminder' : 'is-event-reminder'}" ${action}>
         <span class="reminder-emoji">${esc(i.emoji)}</span>
-        <span class="reminder-copy"><strong>${esc(i.title)}</strong><small>${esc(formatTimeShort(i.time))}</small></span>
+        <span class="reminder-copy"><strong>${esc(i.title)}</strong><small>${esc(i.date)} · ${esc(i.time)}</small></span>
         <span class="reminder-dot"></span>
       </button>`;
     }).join('')}</div>` : `<div class="reminder-section-empty">${esc(emptyText)}</div>`}
@@ -1583,7 +1481,7 @@ function reminderPanel() {
   </div>`;
 }
 
-function topActions() { return `<div class="top-actions"><button class="action-icon reminder" aria-label="Reminders" data-reminders>${icon('bell')}<span class="badge">${eventNotificationCount()}</span></button><div class="date">${icon('calendar')}<span class="today-label"></span><span class="today-time"></span></div><button class="profile-mini" data-route="settings" aria-label="Account settings">${avatarMarkup()}</button><button class="profile-chevron" data-route="settings" aria-label="Account settings">${icon('chevron')}</button></div>`; }
+function topActions() { return `<div class="top-actions"><button class="action-icon reminder" aria-label="Reminders" data-reminders>${icon('bell')}<span class="badge">${eventNotificationCount()}</span></button><div class="date">${icon('calendar')}<span class="today-label"></span></div><button class="profile-mini" data-route="settings" aria-label="Open account settings">${avatarMarkup()}</button><button class="profile-chevron" data-route="settings" aria-label="Account settings">${icon('chevron')}</button></div>`; }
 function mobileHeader() { const standalone = window.matchMedia?.('(display-mode: standalone)').matches || window.navigator.standalone === true; return `<div class="mobile-header"><button class="hamburger" id="menuToggle" aria-label="Open menu">${icon('menu')}</button><div class="mobile-brand">${logo()}<strong>Habitly</strong></div><div class="mobile-actions"><button class="action-icon reminder" data-reminders aria-label="Reminders" title="Reminders">${icon('bell')}<span class="badge">${eventNotificationCount()}</span></button>${standalone ? '' : `<button class="action-icon install-mobile" data-install-app aria-label="Install Habitly" title="Install Habitly">${icon('download')}</button>`}<button class="action-icon" data-route="calendar" aria-label="Calendar" title="Calendar">${icon('calendar')}</button><button class="profile-mini" data-route="settings" aria-label="Open account settings">${avatarMarkup()}</button></div></div>`; }
 function shell(route, content) { return `<div class="app-shell">${sidebar(route)}<main class="main-content page-${route}">${mobileHeader()}<div class="desktop-top">${topActions()}</div>${content}</main>${mobileDrawer(route)}${reminderPanel()}</div>`; }
 function greeting(sub = 'Stay consistent, the results will follow.') { const hour = new Date().getHours(); const text = hour >= 5 && hour < 12 ? 'Good morning' : hour >= 12 && hour < 17 ? 'Good afternoon' : hour >= 17 && hour < 21 ? 'Good evening' : 'Good night'; const name = esc(state.profile?.name || currentAuthUser?.user_metadata?.name || currentAuthUser?.email?.split('@')[0] || 'there'); return `<header class="greeting"><h1>${text}, <span>${name}!</span> <b>👋</b></h1><p>${sub}</p></header>`; }
@@ -1918,7 +1816,7 @@ function settingsSection(key) {
     const connected = !!d.connected && driveSelected;
     const status = connected ? backupStatusText(d) : '';
     return `<article class="settings-card"><div class="settings-card-head"><div class="settings-heading-icon purple">${icon('database')}</div><div><h2>Data & Backup</h2><p>Choose where Habitly keeps your personal data. Your choice is remembered for this account.</p></div></div>
-      <div class="storage-current"><div><span class="eyebrow">CURRENT STORAGE</span><strong>${esc(storageModeLabel(mode))}</strong><small>${mode === 'local' ? 'Your Habitly data stays on this device.' : mode === 'drive' ? 'Google Drive is the active cross-device sync and backup.' : 'Habitly uses Supabase realtime sync and keeps a Google Drive backup.'}</small></div><button class="secondary-btn" id="changeStorage">Change storage</button></div>
+      <div class="storage-current"><div><span class="eyebrow">CURRENT STORAGE</span><strong>${esc(storageModeLabel(mode))}</strong><small>${mode === 'local' ? 'Your Habitly data stays on this device.' : mode === 'drive' ? 'Supabase provides realtime sync; Google Drive is the durable backup.' : 'Habitly syncs across devices and keeps a Google Drive backup.'}</small></div><button class="secondary-btn" id="changeStorage">Change storage</button></div>
        ${mode !== 'local' ? `<div class="backup-status-line ${cloudSyncError ? 'waiting' : 'ready'}">${icon(cloudSyncError ? 'info' : 'check')}<span>${esc(cloudStatusText())}</span></div>` : ''}
       <div class="backup-actions"><button class="backup-card" id="exportBackup"><span>${icon('download')}</span><b>Export backup</b><small>Download your complete Habitly data as JSON.</small></button><label class="backup-card"><span>${icon('upload')}</span><b>Import backup</b><small>Restore a Habitly JSON backup from this device.</small><input id="importBackup" type="file" accept="application/json,.json"></label></div>
       ${driveSelected ? `<div class="drive-backup-card"><div class="drive-head"><div class="drive-icon">${icon('cloud')}</div><div><h3>Google Drive Backup</h3><p>Habitly keeps one rolling backup file in your Drive. It updates instead of creating daily files.</p></div><span class="drive-status ${connected ? 'connected' : ''}">${connected ? 'Connected' : 'Not connected'}</span></div><div class="drive-copy"><div><b>Habitly_Backup.json</b><small>${connected ? (d.email ? `Google account: ${esc(d.email)}` : 'Connected to Google Drive') : 'Connect Google Drive to enable cloud backup.'}</small></div><div class="drive-last"><span>Last synced</span><strong>${connected && d.lastBackupAt ? formatBackupTime(d.lastBackupAt) : 'Not backed up yet'}</strong></div></div>${connected ? `<div class="backup-status-line ${d.lastBackupDate === todayISO() ? 'ready' : 'waiting'}">${icon(d.lastBackupDate === todayISO() ? 'check' : 'info')}<span>${esc(status)}</span></div>` : ''}<div class="drive-actions"><button class="primary-btn" id="driveConnect">${icon(connected ? 'refresh' : 'cloud')}${connected ? 'Reconnect Google Drive' : 'Connect Google Drive'}</button>${connected ? `<button class="secondary-btn" id="driveBackupNow">${icon('cloud')} Back up now</button><button class="secondary-btn" id="driveRestore">${icon('download')} Restore backup</button>` : ''}</div>${connected ? `<label class="drive-auto"><span><b>Automatic backup · ${d.autoDaily !== false ? 'On' : 'Off'}</b><small>When enabled, Habitly updates the same Google Drive backup shortly after you add, edit, update or delete data, and also checks it when you open Habitly.</small></span><input type="checkbox" id="driveAutoDaily" ${d.autoDaily !== false ? 'checked' : ''}><i class="toggle"></i></label>` : ''}<div class="settings-note drive-note">${connected ? 'Only one cloud backup is maintained. No separate daily files are created. Your profile photo is not included in the cloud JSON backup.' : 'Connect Google Drive to enable cloud storage and backup controls.'}</div></div>` : `<div class="settings-note">Google Drive backup controls are hidden because this account is using This device storage. Choose Drive or Both above if you want cloud storage.</div>`}
@@ -1983,7 +1881,7 @@ async function driveRequest(url, options = {}) {
   headers.set('Authorization', `Bearer ${googleAccessToken}`);
   return fetch(url, { ...options, headers });
 }
-function backupPayload(sourceState = state, syncRevision = 0) { const safeState = clone(sourceState); if (safeState.profile) safeState.profile.avatar = ''; return { backupVersion: 4, app: 'Habitly', appVersion: APP_VERSION, accountId: currentAuthUser?.id || '', updatedAt: new Date().toISOString(), syncRevision: Number(syncRevision) || 0, syncDeviceId: ensureCloudDeviceId(), data: safeState }; }
+function backupPayload(sourceState = state) { const safeState = clone(sourceState); if (safeState.profile) safeState.profile.avatar = ''; return { backupVersion: 3, app: 'Habitly', appVersion: APP_VERSION, accountId: currentAuthUser?.id || '', updatedAt: new Date().toISOString(), data: safeState }; }
 async function findOrCreateDriveFolder() {
   const q = encodeURIComponent("name='Habitly Backups' and mimeType='application/vnd.google-apps.folder' and trashed=false");
   const res = await driveRequest(`https://www.googleapis.com/drive/v3/files?q=${q}&spaces=drive&fields=files(id,name)&pageSize=10`); if (!res.ok) throw new Error('Drive folder lookup failed'); const data = await res.json(); if (data.files?.[0]) return data.files[0].id;
@@ -2093,7 +1991,6 @@ async function uploadDriveBackup(options = {}) {
   let d = driveSettings();
   const prevLastBackupDate = d.lastBackupDate, prevLastBackupAt = d.lastBackupAt;
   let remoteStateForMerge = null;
-  let remoteDriveRevision = Number(driveSettings().syncRevision) || 0;
   let remoteETag = '';
   try {
     if (!googleAccessToken) throw new Error('Connect Google Drive first');
@@ -2133,7 +2030,6 @@ async function uploadDriveBackup(options = {}) {
       if (!remoteResponse.ok) throw new Error('Remote backup could not be read');
       const rawRemote = await remoteResponse.json();
       remoteStateForMerge = backupEnvelopeState(rawRemote);
-      remoteDriveRevision = Number(rawRemote?.syncRevision) || Number(remoteStateForMerge?.settings?.drive?.syncRevision) || 0;
       // Drive is downstream when Supabase cloud sync is enabled. Its existing
       // contents are never merged back into the active cloud state here; doing
       // that would reintroduce the exact phone-vs-laptop regression this layer
@@ -2149,29 +2045,18 @@ async function uploadDriveBackup(options = {}) {
       throw new Error('Sync safety guard: refusing to replace a non-empty backup with an unexplained empty state');
     }
 
-    const nextDriveRevision = Math.max(Number(remoteDriveRevision) || 0, Number(d.syncRevision) || 0) + 1;
-    uploadState.settings = uploadState.settings || clone(defaultState.settings);
-    uploadState.settings.drive = { ...(uploadState.settings.drive || {}), syncRevision: nextDriveRevision };
-    const body = JSON.stringify(backupPayload(uploadState, nextDriveRevision));
+    const body = JSON.stringify(backupPayload(uploadState));
     let result = null;
     if (fileId) {
       let uploadHeaders = {'Content-Type':'application/json'};
       if (remoteETag) uploadHeaders['If-Match'] = remoteETag;
       let res = await driveRequest(`https://www.googleapis.com/upload/drive/v3/files/${encodeURIComponent(fileId)}?uploadType=media`, { method:'PATCH', headers:uploadHeaders, body });
       if (res.status === 412) {
-        // Another device committed the backup between our metadata read and
-        // PATCH. Never overwrite that newer Drive revision. Re-enter the full
-        // upload path so it downloads the newest envelope, rebases the still-
-        // pending user mutation journal, obtains the new ETag, and retries the
-        // conditional write. This is the Drive equivalent of the Supabase CAS
-        // retry loop and is essential for phone/laptop concurrent edits.
-        const retryCount = Number(options._driveRetry || 0);
-        if (retryCount < 3) {
-          googleDriveBusy = false;
-          return await uploadDriveBackup({ ...options, _driveRetry: retryCount + 1, silent: true });
-        }
+        // Another device changed the file between metadata read and upload.
+        // Do not overwrite it. Queue a fresh reconciliation against the new
+        // remote revision.
         driveUploadQueued = true;
-        throw new Error('Drive changed repeatedly during sync; queued a safe retry');
+        throw new Error('Drive changed during sync; queued a safe retry');
       }
       if (!res.ok && res.status === 404) {
         await discover();
@@ -2192,7 +2077,7 @@ async function uploadDriveBackup(options = {}) {
       fileId = result.id;
     }
     const uploadedRemoteTime = result.modifiedTime || new Date().toISOString();
-    d = driveSettings(); d.connected=true; d.folderId=folderId; d.fileId=result.id || fileId || ''; d.remoteEverSynced=true; d.lastRemoteUpdatedAt=uploadedRemoteTime; d.lastBackupDate=todayISO(); d.lastBackupAt=new Date().toISOString(); d.syncRevision=nextDriveRevision;
+    d = driveSettings(); d.connected=true; d.folderId=folderId; d.fileId=result.id || fileId || ''; d.remoteEverSynced=true; d.lastRemoteUpdatedAt=uploadedRemoteTime; d.lastBackupDate=todayISO(); d.lastBackupAt=new Date().toISOString(); d.syncRevision=(Number(d.syncRevision)||0)+1;
     driveLastKnownRemoteModifiedAt=uploadedRemoteTime; driveLastSyncCheckAt=Date.now(); driveSyncRetryCount=0; driveRemoteMissing=false;
 
     if (uploadGeneration === syncGeneration) {
@@ -2895,17 +2780,7 @@ function render() {
   if (route === 'dashboard') maybeAutoBackupOnOpen();
 }
 
-function setTodayLabels() {
-  const update = () => {
-    const d = new Date();
-    const dateText = d.toLocaleDateString('en-IN', { weekday: 'long', day: '2-digit', month: 'short', year: 'numeric' });
-    const timeText = formatTime(`${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}`);
-    document.querySelectorAll('.today-label').forEach(x => x.textContent = dateText);
-    document.querySelectorAll('.today-time').forEach(x => x.textContent = ` · ${timeText}`);
-  };
-  update();
-  if (!headerClockTimer) headerClockTimer = setInterval(update, 1000);
-}
+function setTodayLabels() { const d = new Date(); document.querySelectorAll('.today-label').forEach(x => x.textContent = d.toLocaleDateString('en-IN', { weekday: 'long', day: '2-digit', month: 'short', year: 'numeric' })); }
 function navigate(route) { if (!ROUTES.includes(route)) return; location.hash = '/' + route; }
 function bindCommon() {
   document.querySelectorAll('[data-route]').forEach(b => b.addEventListener('click', () => { navigate(b.dataset.route); closeDrawer(); }));
@@ -3092,8 +2967,6 @@ function clearAuthenticatedState() {
   clearTimeout(driveSyncRetryTimer);
   clearInterval(driveRealtimePollTimer);
   clearInterval(reminderUiTimer);
-  clearInterval(headerClockTimer);
-  headerClockTimer = null;
   clearTimeout(reminderSchedulerTimer);
   reminderUiTimer = null;
   reminderSchedulerTimer = null;
@@ -3132,10 +3005,6 @@ function clearAuthenticatedState() {
 if (typeof window !== 'undefined') {
   window.__habitlyTestHooks = {
     setState: next => { state = normalizeState(clone(next)); },
-    setAuthUser: user => { currentAuthUser = user || null; },
-    setGoogleAccessToken: token => { googleAccessToken = String(token || ''); googleTokenExpiresAt = Date.now() + 3600000; },
-    uploadDriveBackup: options => uploadDriveBackup(options),
-    checkDriveForExternalChanges: () => checkDriveForExternalChanges(),
     getState: () => clone(state),
     resetSyncTracking: () => resetSyncTracking(state),
     save: options => save(options),

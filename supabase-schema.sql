@@ -84,3 +84,79 @@ end;
 $$;
 
 grant execute on function public.register_visitor(text,text) to anon, authenticated;
+
+
+-- ============================================================
+-- Habitly realtime synchronization
+-- ============================================================
+-- One authenticated row per Habitly account. The browser keeps the
+-- working copy + durable mutation queue locally; this row is the
+-- revisioned cloud synchronization document. Google Drive remains
+-- an independent backup/restore layer.
+create table if not exists public.habitly_sync_documents (
+  user_id uuid primary key references auth.users(id) on delete cascade,
+  revision bigint not null check (revision >= 1),
+  state jsonb not null,
+  updated_at timestamptz not null default now(),
+  updated_by text not null,
+  constraint habitly_sync_state_object check (jsonb_typeof(state) = 'object')
+);
+
+alter table public.habitly_sync_documents enable row level security;
+
+drop policy if exists "users may read own Habitly sync document" on public.habitly_sync_documents;
+create policy "users may read own Habitly sync document"
+on public.habitly_sync_documents
+for select to authenticated
+using (auth.uid() = user_id);
+
+drop policy if exists "users may insert own Habitly sync document" on public.habitly_sync_documents;
+create policy "users may insert own Habitly sync document"
+on public.habitly_sync_documents
+for insert to authenticated
+with check (auth.uid() = user_id);
+
+drop policy if exists "users may update own Habitly sync document" on public.habitly_sync_documents;
+create policy "users may update own Habitly sync document"
+on public.habitly_sync_documents
+for update to authenticated
+using (auth.uid() = user_id)
+with check (auth.uid() = user_id);
+
+grant select, insert, update on public.habitly_sync_documents to authenticated;
+
+-- The database clock is authoritative for cloud commit time. Client clocks can
+-- differ substantially between a phone and a laptop, so updated_at must never
+-- be used as the cross-device ordering primitive. The revision CAS above is the
+-- ordering primitive; this trigger only makes the audit timestamp trustworthy.
+create or replace function public.habitly_sync_set_updated_at()
+returns trigger
+language plpgsql
+as $$
+begin
+  new.updated_at = now();
+  return new;
+end;
+$$;
+
+drop trigger if exists habitly_sync_documents_set_updated_at on public.habitly_sync_documents;
+create trigger habitly_sync_documents_set_updated_at
+before update on public.habitly_sync_documents
+for each row execute function public.habitly_sync_set_updated_at();
+
+grant execute on function public.habitly_sync_set_updated_at() to authenticated;
+
+-- Supabase Realtime must be able to observe this table. The command is
+-- idempotent when the table is already a member of the publication.
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_publication_tables
+    where pubname = 'supabase_realtime'
+      and schemaname = 'public'
+      and tablename = 'habitly_sync_documents'
+  ) then
+    alter publication supabase_realtime add table public.habitly_sync_documents;
+  end if;
+end $$;

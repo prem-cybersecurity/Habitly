@@ -18,8 +18,13 @@
 
   function goDashboard() {
     setGate(false);
-    if (location.hash !== '#/dashboard') {
-      location.hash = '/dashboard';
+    // Authentication events must not destroy the user's current SPA route.
+    // Only the transition from login/empty state to an authenticated session
+    // is allowed to choose Dashboard. Token refresh, focus, tab restore, and
+    // repeated auth initialization must leave Goals/Habits/Calendar/etc intact.
+    const current = location.hash || '';
+    if (!current || current === '#/login') {
+      history.replaceState(null, '', '#/dashboard');
     }
   }
 
