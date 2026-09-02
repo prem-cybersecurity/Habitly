@@ -1,4 +1,4 @@
-const CACHE_NAME = 'habitly-v25-shell-20260901';
+const CACHE_NAME = 'habitly-v30-shell-20260902';
 const STATIC_CACHE = `${CACHE_NAME}-static`;
 
 const APP_SHELL = [
@@ -11,9 +11,6 @@ const APP_SHELL = [
   './config.js',
   './manifest.webmanifest',
   './og-image.png',
-  './admin.html',
-  './admin.css',
-  './admin.js',
   './assets/Fav Icon Habitly.png',
   './assets/Habitly Leaf Transparent.png',
   './assets/Habitly Leaf White.png',

@@ -2,7 +2,7 @@
    Dashboard / Habits / Goals / Calendar / Statistics
 */
 const AS = 'assets/';
-const APP_VERSION = '2.3.0';
+const APP_VERSION = '3.0.0';
 const ROUTES = ['dashboard', 'habits', 'goals', 'calendar', 'statistics', 'settings'];
 const STORAGE = 'habitly.final.v2';
 const USER_STORAGE_PREFIX = 'habitly.final.v3.user.';
@@ -51,7 +51,7 @@ let syncGeneration = 0;
 
 // Supabase is the realtime synchronization layer for cloud-enabled accounts.
 // Google Drive remains a backup/restore/export layer.
-const CLOUD_TABLE = 'habitly_sync_documents';
+const CLOUD_TABLE = 'habitly_sync_documents_v2';
 const CLOUD_CHANNEL = 'habitly-cloud-sync';
 let cloudRevision = 0;
 let cloudDeviceId = '';
@@ -96,7 +96,7 @@ const defaultState = {
     notifications: { daily: true, motivational: true, weekly: true, goal: true },
     habits: { defaultView: 'All Habits', weekStarts: 'Sunday', autoComplete: true, keepStreak: true, quickQuantity: true },
     drive: { connected: false, email: '', folderId: '', fileId: '', lastBackupDate: '', lastBackupAt: '', lastRemoteUpdatedAt: '', remoteEverSynced: false, syncRevision: 0, autoDaily: true },
-    storage: { mode: 'local', setupCompleted: true }
+    storage: { mode: 'cloud', setupCompleted: true }
   }
 };
 
@@ -113,7 +113,7 @@ function freshUserState(user) {
   fresh.reminders = [];
   fresh.activityHistory = {};
   fresh.syncMeta = clone(defaultState.syncMeta);
-  fresh.settings.storage = { mode: '', setupCompleted: false };
+  fresh.settings.storage = { mode: 'cloud', setupCompleted: true };
   fresh.profile = {
     name: user?.user_metadata?.full_name || user?.user_metadata?.name || (user?.email ? user.email.split('@')[0] : 'Habitly User'),
     email: user?.email || '',
@@ -380,16 +380,23 @@ function applyMutationJournal(remoteState, localState, mutations, baseState = nu
   // pending journal on top of it, and retry. This gives us deterministic
   // server-commit ordering without trusting phone/laptop clocks and, crucially,
   // prevents legitimate offline edits from silently disappearing.
-  for (const m of [...(mutations || [])].sort((a,b)=>recordTime(a.at)-recordTime(b.at))) {
+  for (const m of [...(mutations || [])]) {
     if (['habits','goals','events','reminders'].includes(m.kind)) {
       const list = Array.isArray(merged[m.kind]) ? merged[m.kind] : [];
       if (m.op === 'delete') {
         merged[m.kind] = list.filter(x=>x.id!==m.recordId);
         tomb[m.kind][m.recordId] = m.at || new Date().toISOString();
       } else if (m.op === 'upsert' && m.record?.id) {
-        const filtered = list.filter(x=>x.id!==m.record.id);
-        filtered.push(clone(m.record));
-        merged[m.kind] = filtered;
+        const existing = list.find(x => x.id === m.record.id);
+        let nextRecord = clone(m.record);
+        // Habit progress is date-scoped. Merge daily history by the per-day
+        // timestamp so two devices can update different days without one full
+        // habit snapshot erasing the other's history.
+        if (m.kind === 'habits' && existing?.daily && m.record?.daily) {
+          nextRecord = mergeCollectionById([existing], [m.record], true, [existing], {})[0] || nextRecord;
+        }
+        merged[m.kind] = list.filter(x=>x.id!==m.record.id);
+        merged[m.kind].push(nextRecord);
         if (tomb[m.kind][m.record.id]) delete tomb[m.kind][m.record.id];
       }
     } else if (m.kind === 'profile' || m.kind === 'settings') {
@@ -565,18 +572,19 @@ function save(options = {}) {
       scheduleCloudSync();
     }
     syncLastSavedSnapshot = createSyncSnapshot(state);
-    if (!options.skipDrive && !cloudStorageSelected()) scheduleDriveBackup();
+    if (!options.skipDrive && cloudStorageSelected()) {
+      scheduleCloudSync();
+    } else if (!options.skipDrive && driveStorageSelected()) {
+      scheduleDriveBackup();
+    }
   } catch (e) { console.error('Habitly save failed:', e); }
 }
 
 function cloudStorageSelected() {
-  const mode = storageMode();
-  // Google Drive mode is intentionally Drive-authoritative.
-  // Supabase is the active realtime authority only for the explicit
-  // "This device + Google Drive" mode. This keeps the UI promise of the
-  // Google Drive storage option honest and prevents an unavailable/missing
-  // Supabase sync table from silently blocking Drive synchronization.
-  return !!currentAuthUser && storageIsConfigured() && mode === 'both' && !!window.habitlySupabase;
+  // Supabase is the ONLY active cross-device data synchronization authority.
+  // Google Drive is backup/restore only and never hydrates or overwrites the
+  // working state automatically. This removes the old Drive-vs-device race.
+  return !!currentAuthUser && storageIsConfigured() && storageMode() === 'cloud' && !!window.habitlySupabase;
 }
 function ensureCloudDeviceId() {
   if (cloudDeviceId) return cloudDeviceId;
@@ -656,20 +664,32 @@ async function fetchCloudDocument() {
   return data || null;
 }
 async function createCloudDocument(initialState) {
+  return commitCloudDocument(0, initialState, []);
+}
+async function commitCloudDocument(expectedRevision, nextState, committedMutations = []) {
   const sb = window.habitlySupabase;
-  const payload = { user_id: currentAuthUser.id, revision: 1, state: cloudDocumentState(initialState, 1, []), updated_at: new Date().toISOString(), updated_by: ensureCloudDeviceId() };
-  const { data, error } = await sb.from(CLOUD_TABLE).insert(payload).select('user_id,revision,state,updated_at,updated_by').single();
-  if (error) throw error;
+  if (!sb || !currentAuthUser?.id) throw new Error('Cloud sync is not available');
+  const nextRevision = Number(expectedRevision) + 1;
+  const payload = cloudDocumentState(nextState, nextRevision, committedMutations);
+  const { data, error } = await sb.rpc('commit_habitly_sync_v2', {
+    p_expected_revision: Number(expectedRevision) || 0,
+    p_state: payload,
+    p_device_id: ensureCloudDeviceId()
+  });
+  if (error) {
+    const msg = String(error.message || error.details || error.hint || '');
+    if (/HABITLY_CONFLICT|revision conflict|expected revision/i.test(msg)) {
+      const conflict = new Error('Cloud revision conflict');
+      conflict.code = 'CLOUD_CONFLICT';
+      throw conflict;
+    }
+    throw error;
+  }
+  if (!data) throw new Error('Cloud commit returned no document');
   return data;
 }
 async function updateCloudDocument(expectedRevision, nextState, committedMutations = []) {
-  const sb = window.habitlySupabase;
-  const nextRevision = Number(expectedRevision) + 1;
-  const payload = { revision: nextRevision, state: cloudDocumentState(nextState, nextRevision, committedMutations), updated_at: new Date().toISOString(), updated_by: ensureCloudDeviceId() };
-  const { data, error } = await sb.from(CLOUD_TABLE).update(payload).eq('user_id', currentAuthUser.id).eq('revision', expectedRevision).select('user_id,revision,state,updated_at,updated_by').maybeSingle();
-  if (error) throw error;
-  if (!data) { const conflict = new Error('Cloud revision conflict'); conflict.code = 'CLOUD_CONFLICT'; throw conflict; }
-  return data;
+  return commitCloudDocument(expectedRevision, nextState, committedMutations);
 }
 async function reconcileCloudDocument() {
   if (!cloudStorageSelected() || !currentAuthUser?.id) return false;
@@ -684,15 +704,25 @@ async function reconcileCloudDocument() {
     return false;
   }
   if (!remote) {
-    // Do not invent a new cloud state when this account already has a Drive
-    // backup; the legacy Drive migration path gets first chance to recover it.
-    const d = driveSettings();
-    if (d.remoteEverSynced || d.fileId) return false;
+    // This is a fresh cloud namespace. Drive is intentionally ignored here:
+    // an old/deleted Drive backup must never become the source of active data.
+    // The first authenticated device establishes the clean cloud baseline.
+    const createGeneration = syncGeneration;
     const created = await createCloudDocument(state);
     cloudRevision = Number(created.revision) || 1;
-    state.syncMeta.cloudRevision = cloudRevision;
     cloudSyncAvailable = true;
     cloudSyncLastAt = Date.now();
+    state.syncMeta = state.syncMeta || clone(defaultState.syncMeta);
+    state.syncMeta.cloudRevision = cloudRevision;
+    if (createGeneration === syncGeneration) {
+      resetSyncTracking(state);
+      if (currentStorageKey) localStorage.setItem(currentStorageKey, JSON.stringify(state));
+    } else {
+      // A user action occurred while the initial cloud write was in flight.
+      // Never clear that newer mutation; let the normal CAS flush publish it.
+      cloudSyncPending = pendingMutations(state).length > 0;
+      if (cloudSyncPending) scheduleCloudSync();
+    }
     return false;
   }
   const remoteState = validateCloudDocument(remote);
@@ -704,7 +734,7 @@ async function reconcileCloudDocument() {
   const avatar = state.profile?.avatar || '';
   const next = pending.length ? adoptRemoteWithPending(remoteState, state, syncBaseState) : remoteState;
   if (avatar && !next.profile.avatar) next.profile.avatar = avatar;
-  next.settings.storage = { ...(next.settings.storage || {}), mode: storageMode(), setupCompleted:true };
+  next.settings.storage = { ...(next.settings.storage || {}), mode: 'cloud', setupCompleted:true };
   state = normalizeState(next);
   cloudRevision = Number(remote.revision);
   state.syncMeta.cloudRevision = cloudRevision;
@@ -886,9 +916,10 @@ function startCloudPolling() {
   }, 1000);
 }
 function driveStorageSelected() {
-  const mode = storageMode();
+  // Drive connection is optional. It can receive a backup from either local or
+  // cloud state, but it is NEVER an active synchronization source.
   const d = driveSettings();
-  return !!currentAuthUser && storageIsConfigured() && (mode === 'drive' || mode === 'both') && !!d.connected;
+  return !!currentAuthUser && !!d.connected;
 }
 
 function scheduleDriveBackup() {
@@ -1822,10 +1853,14 @@ function weekView(cursor) {
 }
 
 function storageModeLabel(mode) {
-  return mode === 'drive' ? 'Google Drive' : mode === 'both' ? 'This device + Google Drive' : 'This device';
+  return mode === 'cloud' || mode === 'both' || mode === 'drive' ? 'This device + Cloud sync' : 'This device';
 }
-function storageIsConfigured() { return !!(state.settings?.storage?.setupCompleted || currentAuthUser?.user_metadata?.habitly_storage_setup); }
-function accountStorageMode() { return currentAuthUser?.user_metadata?.habitly_storage_mode || state.settings?.storage?.mode || 'local'; }
+function storageIsConfigured() { return !!currentAuthUser && (state.settings?.storage?.setupCompleted !== false); }
+function accountStorageMode() {
+  const raw = currentAuthUser?.user_metadata?.habitly_storage_mode || state.settings?.storage?.mode || 'cloud';
+  if (raw === 'drive' || raw === 'both' || raw === 'cloud') return 'cloud';
+  return 'local';
+}
 function storageMode() { return accountStorageMode(); }
 function backupStatusText(d) {
   if (!d?.connected) return 'Connect Google Drive to start cloud backups.';
@@ -1840,11 +1875,10 @@ function backupStatusText(d) {
 }
 function showStorageOnboarding() {
   if (!currentAuthUser || storageIsConfigured() || storageOnboardingBusy) return;
-  modal('Choose your storage', 'Choose once how Habitly should keep your personal data. You can change this later in Settings.', `<div class="storage-choice-grid">
-    <button class="storage-choice" type="button" data-storage-choice="local"><span class="storage-choice-icon">${icon('desktop')}</span><span><b>This device</b><small>Keep Habitly data in this browser. No Google Drive permission is required.</small></span><strong>Recommended for simple use</strong></button>
-    <button class="storage-choice" type="button" data-storage-choice="drive"><span class="storage-choice-icon">${icon('database')}</span><span><b>Google Drive</b><small>Use Google Drive for your Habitly data and complete Drive access now.</small></span><strong>Cloud storage</strong></button>
-    <button class="storage-choice" type="button" data-storage-choice="both"><span class="storage-choice-icon">${icon('cloud')}</span><span><b>This device + Google Drive</b><small>Keep a local copy and securely back up the same Habitly data to Drive.</small></span><strong>Best protection</strong></button>
-  </div><div class="storage-choice-note">You’ll only see this setup once. Google Drive permission is requested immediately if you choose Drive or Both.</div>`);
+  modal('Choose your storage', 'Habitly is local-first. Cloud sync keeps your data consistent across devices; Google Drive is an optional backup.', `<div class="storage-choice-grid">
+    <button class="storage-choice" type="button" data-storage-choice="local"><span class="storage-choice-icon">${icon('desktop')}</span><span><b>This device</b><small>Keep Habitly data only in this browser. No cross-device sync.</small></span><strong>Local only</strong></button>
+    <button class="storage-choice" type="button" data-storage-choice="cloud"><span class="storage-choice-icon">${icon('cloud')}</span><span><b>This device + Cloud sync</b><small>Use Supabase as the single cross-device data source. Google Drive can be connected later as backup.</small></span><strong>Recommended</strong></button>
+  </div>`);
   document.querySelectorAll('[data-storage-choice]').forEach(b => b.addEventListener('click', () => chooseStorage(b.dataset.storageChoice)));
 }
 async function chooseStorage(mode) {
@@ -1854,6 +1888,15 @@ async function chooseStorage(mode) {
     await persistStorageChoice('local');
     save(); closeModal(); render(); toast('Storage set to This device'); return;
   }
+  if (mode === 'cloud') {
+    state.settings.storage = { mode: 'cloud', setupCompleted: true };
+    await persistStorageChoice('cloud');
+    await initializeCloudSync();
+    subscribeCloudRealtime();
+    startCloudPolling();
+    closeModal(); render(); toast('Cloud sync is ready'); return;
+  }
+  // Legacy Drive setup path retained only for existing/manual callers.
   storageOnboardingMode = mode;
   storageOnboardingBusy = true;
   const title = mode === 'both' ? 'Connect Google Drive' : 'Set up Google Drive';
@@ -1887,10 +1930,22 @@ function changeStorageMode() {
   const current = storageMode();
   modal('Change storage', `Current storage: ${storageModeLabel(current)}. Choose a new storage method.`, `<div class="storage-choice-grid compact">
     <button class="storage-choice ${current === 'local' ? 'selected' : ''}" type="button" data-change-storage="local"><span class="storage-choice-icon">${icon('desktop')}</span><span><b>This device</b><small>Keep your local Habitly data in this browser.</small></span></button>
-    <button class="storage-choice ${current === 'drive' ? 'selected' : ''}" type="button" data-change-storage="drive"><span class="storage-choice-icon">${icon('database')}</span><span><b>Google Drive</b><small>Use Google Drive for cloud storage.</small></span></button>
-    <button class="storage-choice ${current === 'both' ? 'selected' : ''}" type="button" data-change-storage="both"><span class="storage-choice-icon">${icon('cloud')}</span><span><b>This device + Google Drive</b><small>Keep local data and Drive backup.</small></span></button>
+    <button class="storage-choice ${current === 'cloud' ? 'selected' : ''}" type="button" data-change-storage="cloud"><span class="storage-choice-icon">${icon('cloud')}</span><span><b>This device + Cloud sync</b><small>Supabase is the active cross-device data source. Google Drive remains backup only.</small></span></button>
   </div>`);
-  document.querySelectorAll('[data-change-storage]').forEach(b => b.addEventListener('click', () => { const m=b.dataset.changeStorage; if(m==='local'){ state.settings.storage={mode:'local',setupCompleted:true}; state.settings.drive.connected=false; state.settings.drive.email=''; save(); closeModal(); render(); toast('Storage changed to This device'); } else { storageOnboardingMode=m; storageOnboardingBusy=false; closeModal(); chooseStorage(m); } }));
+  document.querySelectorAll('[data-change-storage]').forEach(b => b.addEventListener('click', async () => {
+    const m=b.dataset.changeStorage;
+    if (m === 'local') {
+      state.settings.storage={mode:'local',setupCompleted:true};
+      await persistStorageChoice('local');
+      stopCloudSync();
+      save({skipDrive:true}); closeModal(); render(); toast('Storage changed to This device');
+    } else {
+      state.settings.storage={mode:'cloud',setupCompleted:true};
+      await persistStorageChoice('cloud');
+      await initializeCloudSync(); subscribeCloudRealtime(); startCloudPolling();
+      closeModal(); render(); toast('Cloud sync enabled');
+    }
+  }));
 }
 function settingsPage() {
   const s = state.settings || defaultState.settings, p = state.profile || defaultState.profile;
@@ -1914,14 +1969,14 @@ function settingsSection(key) {
     const d = (state.settings?.drive) || {};
     const storage = state.settings?.storage || { mode: 'local', setupCompleted: true };
     const mode = storage.mode || 'local';
-    const driveSelected = mode === 'drive' || mode === 'both';
+    const driveSelected = mode === 'cloud';
     const connected = !!d.connected && driveSelected;
     const status = connected ? backupStatusText(d) : '';
-    return `<article class="settings-card"><div class="settings-card-head"><div class="settings-heading-icon purple">${icon('database')}</div><div><h2>Data & Backup</h2><p>Choose where Habitly keeps your personal data. Your choice is remembered for this account.</p></div></div>
-      <div class="storage-current"><div><span class="eyebrow">CURRENT STORAGE</span><strong>${esc(storageModeLabel(mode))}</strong><small>${mode === 'local' ? 'Your Habitly data stays on this device.' : mode === 'drive' ? 'Google Drive is the active cross-device sync and backup.' : 'Habitly uses Supabase realtime sync and keeps a Google Drive backup.'}</small></div><button class="secondary-btn" id="changeStorage">Change storage</button></div>
-       ${mode !== 'local' ? `<div class="backup-status-line ${cloudSyncError ? 'waiting' : 'ready'}">${icon(cloudSyncError ? 'info' : 'check')}<span>${esc(cloudStatusText())}</span></div>` : ''}
+    return `<article class="settings-card"><div class="settings-card-head"><div class="settings-heading-icon purple">${icon('database')}</div><div><h2>Data & Backup</h2><p>Habitly works locally first. Cloud sync keeps every device consistent; Google Drive is an optional backup and restore layer.</p></div></div>
+      <div class="storage-current"><div><span class="eyebrow">CURRENT STORAGE</span><strong>This device + Cloud sync</strong><small>Habitly is local-first and uses Supabase as the single cross-device data source. Google Drive is backup/restore only.</small></div></div>
+       ${mode === 'cloud' ? `<div class="backup-status-line ${cloudSyncError ? 'waiting' : 'ready'}">${icon(cloudSyncError ? 'info' : 'check')}<span>${esc(cloudStatusText())}</span></div>` : ''}
       <div class="backup-actions"><button class="backup-card" id="exportBackup"><span>${icon('download')}</span><b>Export backup</b><small>Download your complete Habitly data as JSON.</small></button><label class="backup-card"><span>${icon('upload')}</span><b>Import backup</b><small>Restore a Habitly JSON backup from this device.</small><input id="importBackup" type="file" accept="application/json,.json"></label></div>
-      ${driveSelected ? `<div class="drive-backup-card"><div class="drive-head"><div class="drive-icon">${icon('cloud')}</div><div><h3>Google Drive Backup</h3><p>Habitly keeps one rolling backup file in your Drive. It updates instead of creating daily files.</p></div><span class="drive-status ${connected ? 'connected' : ''}">${connected ? 'Connected' : 'Not connected'}</span></div><div class="drive-copy"><div><b>Habitly_Backup.json</b><small>${connected ? (d.email ? `Google account: ${esc(d.email)}` : 'Connected to Google Drive') : 'Connect Google Drive to enable cloud backup.'}</small></div><div class="drive-last"><span>Last synced</span><strong>${connected && d.lastBackupAt ? formatBackupTime(d.lastBackupAt) : 'Not backed up yet'}</strong></div></div>${connected ? `<div class="backup-status-line ${d.lastBackupDate === todayISO() ? 'ready' : 'waiting'}">${icon(d.lastBackupDate === todayISO() ? 'check' : 'info')}<span>${esc(status)}</span></div>` : ''}<div class="drive-actions"><button class="primary-btn" id="driveConnect">${icon(connected ? 'refresh' : 'cloud')}${connected ? 'Reconnect Google Drive' : 'Connect Google Drive'}</button>${connected ? `<button class="secondary-btn" id="driveBackupNow">${icon('cloud')} Back up now</button><button class="secondary-btn" id="driveRestore">${icon('download')} Restore backup</button>` : ''}</div>${connected ? `<label class="drive-auto"><span><b>Automatic backup · ${d.autoDaily !== false ? 'On' : 'Off'}</b><small>When enabled, Habitly updates the same Google Drive backup shortly after you add, edit, update or delete data, and also checks it when you open Habitly.</small></span><input type="checkbox" id="driveAutoDaily" ${d.autoDaily !== false ? 'checked' : ''}><i class="toggle"></i></label>` : ''}<div class="settings-note drive-note">${connected ? 'Only one cloud backup is maintained. No separate daily files are created. Your profile photo is not included in the cloud JSON backup.' : 'Connect Google Drive to enable cloud storage and backup controls.'}</div></div>` : `<div class="settings-note">Google Drive backup controls are hidden because this account is using This device storage. Choose Drive or Both above if you want cloud storage.</div>`}
+      ${driveSelected ? `<div class="drive-backup-card"><div class="drive-head"><div class="drive-icon">${icon('cloud')}</div><div><h3>Google Drive Backup</h3><p>Habitly keeps one rolling backup file in your Drive. It updates instead of creating daily files.</p></div><span class="drive-status ${connected ? 'connected' : ''}">${connected ? 'Connected' : 'Not connected'}</span></div><div class="drive-copy"><div><b>Habitly_Backup.json</b><small>${connected ? (d.email ? `Google account: ${esc(d.email)}` : 'Connected to Google Drive') : 'Connect Google Drive to enable cloud backup.'}</small></div><div class="drive-last"><span>Last synced</span><strong>${connected && d.lastBackupAt ? formatBackupTime(d.lastBackupAt) : 'Not backed up yet'}</strong></div></div>${connected ? `<div class="backup-status-line ${d.lastBackupDate === todayISO() ? 'ready' : 'waiting'}">${icon(d.lastBackupDate === todayISO() ? 'check' : 'info')}<span>${esc(status)}</span></div>` : ''}<div class="drive-actions"><button class="primary-btn" id="driveConnect">${icon(connected ? 'refresh' : 'cloud')}${connected ? 'Reconnect Google Drive' : 'Connect Google Drive'}</button>${connected ? `<button class="secondary-btn" id="driveBackupNow">${icon('cloud')} Back up now</button><button class="secondary-btn" id="driveRestore">${icon('download')} Restore backup</button>` : ''}</div>${connected ? `<label class="drive-auto"><span><b>Automatic backup · ${d.autoDaily !== false ? 'On' : 'Off'}</b><small>When enabled, Habitly backs up the latest acknowledged cloud state to the same Google Drive file. Drive is never used as the active sync source.</small></span><input type="checkbox" id="driveAutoDaily" ${d.autoDaily !== false ? 'checked' : ''}><i class="toggle"></i></label>` : ''}<div class="settings-note drive-note">${connected ? 'Only one cloud backup is maintained. No separate daily files are created. Your profile photo is not included in the cloud JSON backup.' : 'Connect Google Drive to enable cloud storage and backup controls.'}</div></div>` : `<div class="settings-note">Google Drive is optional. Connect it here when you want a durable backup/restore copy of your cloud-synchronized data.</div>`}
     </article>`;
   }
   return `<article class="settings-card about-settings"><div class="about-hero"><div class="about-logo"><img src="${AS}Habitly Leaf Transparent.png" alt="Habitly leaf logo"></div><div><span class="eyebrow">HABITLY BY PRK</span><h2>About Habitly</h2><p>Your personal habit and goal tracking companion.</p></div></div><div class="about-copy"><h3>About me</h3><p>I'm Prem Kumar, an Integrated B.Tech–M.Tech Cyber Security student focused on cloud security, secure software and practical cybersecurity engineering. I build hands-on projects to strengthen my skills in secure systems, automation and real-world application development.</p><h3>Why I created Habitly</h3><p>I created Habitly as a practical productivity application that brings habits and long-term goals into one focused workspace. It makes progress visible, measurable and editable while giving me a real-world project for building responsive interfaces, state management, persistence and user-focused software.</p></div><div class="about-links"><a href="https://github.com/prem-cybersecurity" target="_blank" rel="noopener noreferrer" aria-label="Open GitHub">${icon('github')}<span>GitHub</span></a><a href="https://premkumar-portfolio-kohl.vercel.app/" target="_blank" rel="noopener noreferrer" aria-label="Open portfolio"><span>Portfolio</span>${icon('external')}</a><a class="linkedin-link" href="https://www.linkedin.com/in/premkumar-cybersecurity" target="_blank" rel="noopener noreferrer" aria-label="Open LinkedIn">${icon('linkedin')}<span>LinkedIn</span></a></div><small class="version-line">Habitly by PRK · Version ${APP_VERSION}</small></article>`;
@@ -2473,56 +2528,10 @@ async function syncDriveOnLogin(options = {}) {
   }
 }
 async function checkDriveForExternalChanges() {
-  if (!currentAuthUser || cloudStorageSelected() || !driveStorageSelected() || !googleAccessToken || driveLoginSyncBusy || driveLoginSyncPending || googleDriveBusy) return false;
-  const d = driveSettings();
-  if (!d.fileId) return false;
-  try {
-    const res = await driveRequest(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(d.fileId)}?fields=id,name,modifiedTime,parents,trashed`);
-    if (!res.ok) {
-      if (res.status === 404) { driveRemoteMissing = !!d.remoteEverSynced; return false; }
-      return false;
-    }
-    const file = await res.json();
-    if (file.trashed || file.name !== 'Habitly_Backup.json' || (d.folderId && !(file.parents || []).includes(d.folderId))) return false;
-    const modified = file.modifiedTime || '';
-    if (driveLastKnownRemoteModifiedAt && modified === driveLastKnownRemoteModifiedAt) return false;
-    const response = await driveRequest(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(file.id)}?alt=media`);
-    if (!response.ok) return false;
-    const remoteState = validateBackupEnvelope(await response.json());
-    // Only acknowledge the remote revision after its content has been fully
-    // downloaded and validated. A failed download must be retried next poll.
-    driveLastKnownRemoteModifiedAt = modified;
-    driveLastSyncCheckAt = Date.now();
-    const localMutations = pendingMutations(state);
-    const hasPendingLocal = localMutations.length > 0 || Object.values(state.syncMeta?.pending || {}).some(Boolean);
-    const before = createSyncSnapshot(state);
-    const avatar = state.profile?.avatar || '';
-    const nextState = hasPendingLocal
-      ? adoptRemoteWithPending(remoteState, state, syncBaseState)
-      : normalizeState(clone(remoteState));
-    if (avatar && !nextState.profile.avatar) nextState.profile.avatar = avatar;
-    nextState.settings.storage = { ...(nextState.settings.storage || {}), mode: storageMode(), setupCompleted:true };
-    state = normalizeState(nextState);
-    const rd = driveSettings(); rd.connected=true; rd.folderId=d.folderId; rd.fileId=file.id; rd.remoteEverSynced=true; rd.lastRemoteUpdatedAt=file.modifiedTime || '';
-    driveHydrationConfirmedUserId = currentAuthUser.id;
-    driveHydrationGeneration++;
-    if (hasPendingLocal) {
-      syncBaseState = createSyncSnapshot(remoteState);
-      syncLastSavedSnapshot = createSyncSnapshot(state);
-      syncDirty = dirtyFromMutations();
-    } else {
-      resetSyncTracking(state);
-    }
-    save({skipDrive:true, markDirty:false});
-    const changed = JSON.stringify(before) !== JSON.stringify(createSyncSnapshot(state));
-    if (hasPendingLocal) {
-      // Upload only after the pending journal has been retained. The upload path
-      // can then reconcile against the current remote revision safely.
-      await uploadDriveBackup({silent:true});
-    }
-    if (changed && currentRoute() !== 'login') render();
-    return changed;
-  } catch (e) { console.warn('Drive external-change check skipped:', e); return false; }
+  // Deprecated active-Drive synchronization path. Google Drive is backup/restore
+  // only in the production architecture. Never hydrate or overwrite active
+  // Habitly state from Drive automatically.
+  return false;
 }
 
 function connectDrive() {
@@ -2624,7 +2633,7 @@ function initSettings() {
       [['#prefAuto', 'autoComplete'], ['#prefStreak', 'keepStreak'], ['#prefQuick', 'quickQuantity']].forEach(([sel, k]) => root.querySelector(sel).addEventListener('change', e => { v[k] = e.target.checked; save(); }));
     }
     if (key === 'security') { root.querySelector('[data-security="sessions"]')?.addEventListener('click', () => toast('This browser is the only active local session.')); root.querySelector('[data-security="clear"]')?.addEventListener('click', () => confirmClearData()); }
-    if (key === 'data') { root.querySelector('#exportBackup')?.addEventListener('click', exportBackup); root.querySelector('#importBackup')?.addEventListener('change', importBackup); root.querySelector('#changeStorage')?.addEventListener('click', changeStorageMode); if (state.settings?.storage?.mode === 'drive' || state.settings?.storage?.mode === 'both') bindDriveSettings(root); }
+    if (key === 'data') { root.querySelector('#exportBackup')?.addEventListener('click', exportBackup); root.querySelector('#importBackup')?.addEventListener('change', importBackup); if (state.settings?.storage?.mode === 'cloud' || state.settings?.storage?.mode === 'drive' || state.settings?.storage?.mode === 'both') bindDriveSettings(root); }
   }
   function safesettings() { if (!state.settings) state.settings = clone(defaultState.settings); return state.settings; }
   function confirmClearData() { modal('Clear local data', 'This removes your saved Habitly data from this browser.', `<div class="confirm-box"><p>Your habits, goals, events and settings will be cleared from this browser. Google Drive data will not be deleted.</p><div class="form-actions"><button class="secondary-btn" data-modal-close>Cancel</button><button class="danger-btn" id="confirmClearSettings">Clear data</button></div></div>`); document.getElementById('confirmClearSettings').addEventListener('click', () => { if (currentStorageKey) localStorage.removeItem(currentStorageKey); localStorage.removeItem(STORAGE); state = freshUserState(currentAuthUser); closeModal(); render(); toast('Local data cleared'); }); }
@@ -2875,7 +2884,7 @@ function maybeAutoBackupOnOpen() {
   // hasn't finished yet (or failed and is waiting on a safe retry). Uploading
   // here first would overwrite the real Drive backup with a stale/unmerged
   // local copy, so this waits for that sync to settle instead.
-  if (!currentAuthUser || cloudStorageSelected() || !storageIsConfigured() || (mode !== 'drive' && mode !== 'both') || !d.connected || d.autoDaily === false || d.lastBackupDate === todayISO() || driveLoginSyncPending || driveHydrationConfirmedUserId !== currentAuthUser.id) return;
+  if (!currentAuthUser || !cloudStorageSelected() || !storageIsConfigured() || !d.connected || d.autoDaily === false || d.lastBackupDate === todayISO() || cloudSyncBusy || pendingMutations(state).length) return;
   const run = () => { if (!googleAccessToken || driveLoginSyncPending) return; uploadDriveBackup(); };
   if (googleAccessToken) setTimeout(run, 400);
   else if (ensureDriveClient()) { requestDriveToken('', { silent: true }).catch(e => console.warn('Automatic Drive authorization unavailable:', e)); }
@@ -3054,34 +3063,24 @@ async function handleAuthenticatedUser(nextUser) {
   state = loadStateForUser(nextUser);
   resetSyncTracking(state);
   if (!state.profile.email) state.profile.email = nextUser.email || '';
-  if (nextUser.user_metadata?.habitly_storage_setup && nextUser.user_metadata?.habitly_storage_mode) {
-    state.settings.storage = { mode: nextUser.user_metadata.habitly_storage_mode, setupCompleted: true };
+  if (nextUser.user_metadata?.habitly_storage_setup && nextUser.user_metadata?.habitly_storage_mode === 'local') {
+    state.settings.storage = { mode: 'local', setupCompleted: true };
+  } else {
+    state.settings.storage = { mode: 'cloud', setupCompleted: true };
   }
   startReminderService();
-  const mode = nextUser.user_metadata?.habitly_storage_mode || state.settings?.storage?.mode;
-  if ((mode === 'drive' || mode === 'both') && state.settings?.storage?.setupCompleted) {
-    appPhase = 'DRIVE_RESTORING';
-    driveLoginSyncPending = true;
-    driveLoginSyncRetryUsed = false;
-    driveLoginSyncWaitAttempts = 0;
-    clearTimeout(driveLoginSyncRetryTimer);
-    initializeCloudSync().finally(() => {
-      if (currentAuthUser?.id !== nextUser.id) return;
-      subscribeCloudRealtime();
-      startCloudPolling();
-      if (cloudSyncAvailable && cloudRevision > 0) {
-        driveLoginSyncPending = false;
-        driveLoginSyncedUserId = nextUser.id;
-        appPhase = 'READY';
-        if (location.hash !== '#/login') render();
-      } else {
-        setTimeout(attemptDriveLoginSync, 300);
-      }
-    });
-  } else {
-    appPhase = 'READY';
+  // New architecture: every authenticated account uses local-first Supabase
+  // synchronization. Legacy Drive/Both account metadata is migrated to cloud
+  // mode. Google Drive is optional backup/restore only.
+  state.settings.storage = { mode: 'cloud', setupCompleted: true };
+  try { await persistStorageChoice('cloud'); } catch (_) {}
+  appPhase = 'READY';
+  initializeCloudSync().finally(() => {
+    if (currentAuthUser?.id !== nextUser.id) return;
+    subscribeCloudRealtime();
+    startCloudPolling();
     if (location.hash !== '#/login') render();
-  }
+  });
 }
 
 function clearAuthenticatedState() {

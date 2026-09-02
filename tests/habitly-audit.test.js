@@ -131,7 +131,7 @@ assert(authSource.includes('googleOAuthInFlight'), 'Google OAuth must have an in
 assert(appSource.includes("await requestDriveToken('consent')"), 'Drive onboarding must use the deduplicated token request path');
 assert(appSource.includes("requestDriveToken('', { silent: true })"), 'automatic Drive authorization must use silent token acquisition');
 assert(appSource.includes('login_hint'), 'Drive authorization must provide the remembered Google account as a login hint');
-assert(appSource.includes("const APP_VERSION = '2.3.0'"), 'application version must match the stabilization build');
+assert(appSource.includes("const APP_VERSION = '3.0.0'"), 'application version must match the stabilization build');
 assert(appSource.includes('Version ${APP_VERSION}'), 'visible About version must use the central application version');
 assert(appSource.includes('<span>Last synced</span>'), 'Settings must show the last synchronization time');
 assert(appSource.includes('if (driveLoginSyncBusy || googleDriveBusy) { driveUploadQueued = true; return; }'), 'busy Drive uploads must queue a newer state');
@@ -160,7 +160,7 @@ assert(appSource.includes('adoptRemoteWithPending'), 'login sync must preserve p
 assert(appSource.includes('Accelerate long-press input for large targets'), 'quantity controls must support accelerated long press');
 assert(appSource.includes('the click handler consumes it instead of adding another unit'), 'long press must not add an extra unit on pointerup/click');
 assert(swSource.includes("fetch(request, { cache: 'no-store' })"), 'app code must use network-first fetching');
-assert(swSource.includes('habitly-v25-shell-20260901'), 'service-worker cache version must be bumped for this stabilization build');
+assert(swSource.includes('habitly-v30-shell-20260902'), 'service-worker cache version must be bumped for this stabilization build');
 assert(appSource.includes('Metadata validation is deliberately one request on the normal path'), 'fast Drive sync path must be documented in code');
 assert(appSource.includes('Metadata validation is deliberately one request on the normal path'), 'normal Drive sync should use cached IDs rather than repeated folder/file discovery');
 assert(!appSource.includes('drive-restoring-screen'), 'login-time Drive restore must not replace the whole application with a blocking restore screen');
@@ -359,14 +359,16 @@ assert(appSource.includes('status === 412'), 'Drive concurrent-write conflicts m
 assert(appSource.includes('createDriveBackupFile'), 'new Drive backups must be created atomically with content');
 assert(appSource.includes('isSuspiciousEmptySync'), 'empty-state safety guard must protect a non-empty cloud backup');
 assert(appSource.includes("habit?.paused ? 'Resume habit' : 'Pause habit'"), 'habit menu must expose pause/resume action');
-assert(schemaSource.includes('create table if not exists public.habitly_sync_documents'), 'Supabase sync table must be defined');
+assert(schemaSource.includes('create table if not exists public.habitly_sync_documents_v2'), 'Supabase v2 sync table must be defined');
 assert(schemaSource.includes('using (auth.uid() = user_id)'), 'Supabase sync rows must be account-isolated by RLS');
-assert(schemaSource.includes('alter publication supabase_realtime add table public.habitly_sync_documents'), 'Supabase sync table must be enabled for Realtime');
-assert(appSource.includes("eq('revision', expectedRevision)"), 'Supabase cloud writes must use optimistic revision matching');
+assert(schemaSource.includes('alter publication supabase_realtime add table public.habitly_sync_documents_v2'), 'Supabase v2 sync table must be enabled for Realtime');
+assert(appSource.includes('commit_habitly_sync_v2'), 'Supabase cloud writes must use the atomic revision CAS RPC');
 assert(appSource.includes('recordVersions'), 'cloud sync must track per-record server versions');
 assert(appSource.includes('mutationConflictsWithRemote'), 'stale same-record writers must be detected deterministically');
 assert(appSource.includes("CLOUD_CONFLICT"), 'Supabase revision conflicts must be handled explicitly');
 assert(appSource.includes('subscribeCloudRealtime'), 'cloud sync must use Realtime when available');
+assert(appSource.includes("mode === 'cloud'"), 'cloud storage mode must be explicit');
+assert(appSource.includes('Google Drive is backup/restore only'), 'Google Drive must remain backup-only');
 assert(appSource.includes('startCloudPolling'), 'cloud sync must have a polling fallback');
 assert(appSource.includes('eventId'), 'reminders must support events');
 assert(appSource.includes('function eventForm(idOrDate)'), 'events must have an editable form');
