@@ -49,6 +49,12 @@
     sendAuthRoute('login');
   }
 
+
+  // Expose only the guarded login transition so the main app can force the
+  // gate open immediately after an explicit logout. The Supabase SIGNED_OUT
+  // event remains the authoritative path; this is a race-proof UI fallback.
+  window.habitlyShowLogin = goLogin;
+
   async function syncAuthState() {
     if (!sb) {
       console.error('Habitly Supabase client was not initialized.');

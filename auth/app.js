@@ -740,8 +740,7 @@ if (google) {
     googleOAuthInFlight = true;
     google.disabled = true;
 
-    const redirectUrl =
-        `${window.top.location.origin}/index.html`;
+    const redirectUrl = getRedirectUrl();
 
     console.log(
         "Habitly Google OAuth redirect:",

@@ -1,4 +1,4 @@
-const CACHE_NAME = 'habitly-v30-shell-20260902';
+const CACHE_NAME = 'habitly-v361-shell-20260903';
 const STATIC_CACHE = `${CACHE_NAME}-static`;
 
 const APP_SHELL = [
@@ -93,10 +93,15 @@ self.addEventListener('fetch', event => {
 
 self.addEventListener('notificationclick', event => {
   event.notification.close();
+  const route = event.notification?.data?.route === 'calendar' ? 'calendar' : 'habits';
+  const target = `./index.html#/${route}`;
   event.waitUntil(
     clients.matchAll({ type: 'window', includeUncontrolled: true }).then(list => {
-      if (list.length) return list[0].focus();
-      return clients.openWindow('./');
+      const existing = list.find(client => new URL(client.url).origin === self.location.origin);
+      if (existing) {
+        return existing.navigate(target).catch(() => {}).then(() => existing.focus());
+      }
+      return clients.openWindow(target);
     })
   );
 });

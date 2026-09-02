@@ -2,7 +2,7 @@
    Dashboard / Habits / Goals / Calendar / Statistics
 */
 const AS = 'assets/';
-const APP_VERSION = '3.0.0';
+const APP_VERSION = '3.6.0';
 const ROUTES = ['dashboard', 'habits', 'goals', 'calendar', 'statistics', 'settings'];
 const STORAGE = 'habitly.final.v2';
 const USER_STORAGE_PREFIX = 'habitly.final.v3.user.';
@@ -93,7 +93,7 @@ const defaultState = {
   syncMeta: { deleted: { habits: {}, goals: {}, events: {}, reminders: {} }, recordVersions: { habits: {}, goals: {}, events: {}, reminders: {} }, pending: { habits: false, goals: false, events: false, reminders: false, profile: false, settings: false, activityHistory: false }, mutations: [] },
   settings: {
     timeFormat: '12h',
-    notifications: { daily: true, motivational: true, weekly: true, goal: true },
+    notifications: { daily: true, habitReminders: true, eventReminders: true, motivational: true, weekly: true, goal: true, defaultEventOffset: 0, defaultHabitTime: '20:00:00', defaultHabitDays: [0,1,2,3,4,5,6] },
     habits: { defaultView: 'All Habits', weekStarts: 'Sunday', autoComplete: true, keepStreak: true, quickQuantity: true },
     drive: { connected: false, email: '', folderId: '', fileId: '', lastBackupDate: '', lastBackupAt: '', lastRemoteUpdatedAt: '', remoteEverSynced: false, syncRevision: 0, autoDaily: true },
     storage: { mode: 'cloud', setupCompleted: true }
@@ -177,7 +177,7 @@ function mergeState(saved, options = {}) {
     settings: saved.settings ? {
       ...clone(defaultState.settings), ...saved.settings,
       timeFormat: saved.settings?.timeFormat === '24h' ? '24h' : '12h',
-      notifications: { ...defaultState.settings.notifications, ...(saved.settings.notifications || {}) },
+      notifications: normalizeNotificationSettings({ ...defaultState.settings.notifications, ...(saved.settings.notifications || {}) }),
       habits: { ...defaultState.settings.habits, ...(saved.settings.habits || {}) },
       drive: { ...defaultState.settings.drive, ...(saved.settings.drive || {}) },
       storage: { ...defaultState.settings.storage, ...(saved.settings.storage || {}) }
@@ -211,7 +211,7 @@ function normalizeState(s) {
   out.settings = out.settings && typeof out.settings === 'object' ? {
     ...clone(defaultState.settings), ...out.settings,
     timeFormat: out.settings?.timeFormat === '24h' ? '24h' : '12h',
-    notifications: { ...defaultState.settings.notifications, ...(out.settings.notifications || {}) },
+    notifications: normalizeNotificationSettings({ ...defaultState.settings.notifications, ...(out.settings.notifications || {}) }),
     habits: { ...defaultState.settings.habits, ...(out.settings.habits || {}) },
     drive: { ...defaultState.settings.drive, ...(out.settings.drive || {}) },
     storage: { ...defaultState.settings.storage, ...(out.settings.storage || {}) }
@@ -243,7 +243,11 @@ function normalizeState(s) {
     if (!r || typeof r !== 'object' || r.source !== 'manual') return false;
     if (!parseTime24(r.time)) return false;
     return stateReminderHabitExists(out.habits, r.habitId) || stateReminderEventExists(out.events, r.eventId);
-  }).map(r => ({ ...r, time: parseTime24(r.time) }));
+  }).map(r => ({
+    ...r,
+    time: parseTime24(r.time),
+    days: r.eventId ? undefined : normalizeReminderDays(r.days)
+  }));
 
   // History is observational data, never something normalization invents.
   // Keep only structurally valid date keys and snapshots; do not manufacture
@@ -256,8 +260,24 @@ function normalizeState(s) {
   out.activityHistory = validHistory;
   return out;
 }
+function normalizeNotificationSettings(input = {}) {
+  const n = { ...clone(defaultState.settings.notifications), ...(input || {}) };
+  n.habitReminders = n.habitReminders !== false;
+  n.eventReminders = n.eventReminders !== false;
+  n.daily = n.habitReminders;
+  n.motivational = n.motivational !== false;
+  n.weekly = n.weekly !== false;
+  n.goal = n.goal !== false;
+  n.defaultEventOffset = [0,5,10,15,30,60,1440].includes(Number(n.defaultEventOffset)) ? Number(n.defaultEventOffset) : 0;
+  n.defaultHabitTime = parseTime24(n.defaultHabitTime) || '20:00:00';
+  const days = Array.isArray(n.defaultHabitDays) ? n.defaultHabitDays.map(Number).filter(d => Number.isInteger(d) && d >= 0 && d <= 6) : [];
+  n.defaultHabitDays = [...new Set(days)].sort((a,b) => a-b);
+  if (!n.defaultHabitDays.length) n.defaultHabitDays = [0,1,2,3,4,5,6];
+  return n;
+}
 function stateReminderHabitExists(habits, id) { return !!id && habits.some(h => h && h.id === id); }
 function stateReminderEventExists(events, id) { return !!id && events.some(e => e && e.id === id); }
+function normalizeReminderDays(days) { const values = Array.isArray(days) ? days.map(Number).filter(d => Number.isInteger(d) && d >= 0 && d <= 6) : []; const unique = [...new Set(values)].sort((a,b) => a-b); return unique.length ? unique : [0,1,2,3,4,5,6]; }
 
 function createSyncSnapshot(s) {
   const snap = clone(s || {});
@@ -551,12 +571,14 @@ function mergeForDriveUpload(remoteState, localState, dirtyOverride = syncDirty,
   return normalizeState(merged);
 }
 
+
 function save(options = {}) {
   try {
     const before = syncLastSavedSnapshot ? createSyncSnapshot(syncLastSavedSnapshot) : null;
     touchChangedRecords(before, state);
     captureActivitySnapshot(state, todayISO());
-    const changed = !!before && JSON.stringify(before) !== JSON.stringify(createSyncSnapshot(state));
+    const afterSnapshot = createSyncSnapshot(state);
+    const changed = !!before && JSON.stringify(before) !== JSON.stringify(afterSnapshot);
     if (options.markDirty !== false && before && changed) {
       appendSyncMutations(before, state);
       syncDirty = dirtyFromMutations();
@@ -572,6 +594,11 @@ function save(options = {}) {
       scheduleCloudSync();
     }
     syncLastSavedSnapshot = createSyncSnapshot(state);
+    // Keep every reminder surface synchronized with local state immediately.
+    // This is intentionally separate from render() because save() is also used
+    // by settings, calendar, and background sync paths that may not re-render.
+    refreshReminderBadge();
+    refreshReminderUi();
     if (!options.skipDrive && cloudStorageSelected()) {
       scheduleCloudSync();
     } else if (!options.skipDrive && driveStorageSelected()) {
@@ -1220,23 +1247,71 @@ async function enableNotifications() {
    REMINDER CHECKER
 ========================= */
 
+function refreshReminderBadge() {
+  const count = eventNotificationCount();
+  document.querySelectorAll('[data-reminders]').forEach(button => {
+    const badge = button.querySelector('.badge');
+    if (badge) {
+      badge.textContent = String(count);
+      badge.hidden = count === 0;
+      badge.setAttribute('aria-label', `${count} upcoming reminder${count === 1 ? '' : 's'}`);
+    }
+    button.classList.toggle('has-reminders', count > 0);
+    button.setAttribute('aria-label', count ? `Reminders · ${count} upcoming` : 'Reminders');
+    button.title = count ? `${count} upcoming reminder${count === 1 ? '' : 's'}` : 'No upcoming reminders';
+  });
+}
+function deleteReminderById(id) {
+  const reminder = state.reminders.find(r => r && r.id === id);
+  if (!reminder) return false;
+  const now = new Date().toISOString();
+  state.reminders = state.reminders.filter(r => r.id !== id);
+  state.syncMeta = state.syncMeta || clone(defaultState.syncMeta);
+  state.syncMeta.deleted = state.syncMeta.deleted || clone(defaultState.syncMeta.deleted);
+  state.syncMeta.deleted.reminders = state.syncMeta.deleted.reminders || {};
+  state.syncMeta.deleted.reminders[id] = now;
+  save();
+  checkReminderNotifications(true);
+  refreshReminderUi();
+  return true;
+}
+function bindReminderControls(root = document) {
+  root.querySelectorAll('[data-add-reminder]').forEach(b => b.addEventListener('click', () => reminderForm()));
+  root.querySelectorAll('[data-edit-reminder]').forEach(b => b.addEventListener('click', () => reminderForm(b.dataset.editReminder)));
+  root.querySelectorAll('[data-edit-event-reminder]').forEach(b => b.addEventListener('click', () => eventForm(b.dataset.editEventReminder)));
+  root.querySelectorAll('[data-edit-event]').forEach(b => b.addEventListener('click', () => eventForm(b.dataset.editEvent)));
+  root.querySelectorAll('[data-delete-reminder]').forEach(b => b.addEventListener('click', e => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (deleteReminderById(b.dataset.deleteReminder)) toast('Reminder deleted');
+  }));
+  root.querySelectorAll('[data-toggle-reminder]').forEach(b => b.addEventListener('change', () => {
+    const r = state.reminders.find(x => x.id === b.dataset.toggleReminder);
+    if (!r) return;
+    r.enabled = b.checked;
+    r.updatedAt = new Date().toISOString();
+    save();
+    checkReminderNotifications(true);
+    refreshReminderUi();
+    toast(r.enabled ? 'Reminder enabled' : 'Reminder turned off');
+  }));
+}
+function refreshReminderPopover() {
+  const popover = document.querySelector('#reminderPopover');
+  if (!popover) return;
+  const data = reminderData();
+  const sections = popover.querySelector('.reminder-sections');
+  if (sections) sections.innerHTML = `${reminderSectionMarkup('Upcoming Events', data.events, 'No upcoming events.', { events: true })} ${reminderSectionMarkup('Habit Reminders', data.habits, 'No habit reminders are set.', { editable: true })}`;
+  bindReminderControls(popover);
+}
 function refreshReminderUi() {
-  document.querySelectorAll('[data-reminders] .badge').forEach(b => { b.textContent = String(eventNotificationCount()); });
+  refreshReminderBadge();
   const list = document.querySelector('#calendarReminderList');
   if (list) {
     list.innerHTML = reminderOverviewMarkup(calendarSelectedDate);
-    list.querySelectorAll('[data-add-reminder]').forEach(b => b.addEventListener('click', () => reminderForm()));
-    list.querySelectorAll('[data-edit-reminder]').forEach(b => b.addEventListener('click', () => reminderForm(b.dataset.editReminder)));
-    list.querySelectorAll('[data-toggle-reminder]').forEach(b => b.addEventListener('change', () => {
-      const r = state.reminders.find(x => x.id === b.dataset.toggleReminder);
-      if (!r) return;
-      r.enabled = b.checked;
-      r.updatedAt = new Date().toISOString();
-      save();
-      refreshReminderUi();
-      toast(r.enabled ? 'Reminder enabled' : 'Reminder turned off');
-    }));
+    bindReminderControls(list);
   }
+  refreshReminderPopover();
 }
 function scheduleNextReminderCheck() {
   clearTimeout(reminderSchedulerTimer);
@@ -1244,9 +1319,8 @@ function scheduleNextReminderCheck() {
   let soonest = null;
   for (const reminder of (state.reminders || [])) {
     if (!reminder || reminder.enabled === false) continue;
-    const candidate = reminderScheduledTime(reminder, now);
+    const candidate = nextReminderOccurrence(reminder, now);
     if (!candidate) continue;
-    if (candidate.getTime() <= now.getTime()) candidate.setDate(candidate.getDate() + 1);
     if (!soonest || candidate < soonest) soonest = candidate;
   }
   if (!soonest) return;
@@ -1286,6 +1360,32 @@ function reminderIsDue(reminder, now = new Date()) {
   const delta = now.getTime() - scheduled.getTime();
   return delta >= 0 && delta <= 5 * 60 * 1000;
 }
+function dispatchBrowserReminderNotification(title, body, route, reminderId) {
+  if (!notificationSupported() || Notification.permission !== 'granted') return;
+  const options = {
+    body,
+    icon: `${AS}Habitly Leaf Transparent.png`,
+    tag: `habitly-reminder-${reminderId}`,
+    renotify: true,
+    data: { route }
+  };
+  const fallback = () => {
+    try {
+      const notification = new Notification(title, options);
+      notification.onclick = () => { window.focus(); notification.close(); navigate(route); };
+    } catch (err) { console.warn('Browser notification failed:', err); }
+  };
+  // A service-worker notification is more reliable than constructing a
+  // window Notification when the PWA/tab is backgrounded. It still cannot
+  // bypass OS/browser permission or a completely closed web app.
+  if (document.visibilityState !== 'visible' && 'serviceWorker' in navigator) {
+    navigator.serviceWorker.ready
+      .then(reg => reg.showNotification(title, options))
+      .catch(fallback);
+    return;
+  }
+  fallback();
+}
 function showReminderNotification(reminder) {
   const habit = reminderHabitFor(reminder);
   const event = reminderEventFor(reminder);
@@ -1293,12 +1393,7 @@ function showReminderNotification(reminder) {
     if (!event) return;
     const title = `Habitly Reminder · ${event.title}`;
     const body = `Upcoming event: "${event.title}" · ${formatDateTime(event.date, event.time)}`;
-    if (notificationSupported() && Notification.permission === 'granted') {
-      try {
-        const notification = new Notification(title, { body, icon: `${AS}Habitly Leaf Transparent.png`, tag: `habitly-reminder-${reminder.id}` });
-        notification.onclick = () => { window.focus(); notification.close(); navigate('calendar'); };
-      } catch (err) { console.warn('Browser notification failed:', err); }
-    }
+    dispatchBrowserReminderNotification(title, body, 'calendar', reminder.id);
     playReminderSound(reminder.sound || 'gentle');
     toast(`⏰ ${event.title}`);
     return;
@@ -1306,12 +1401,7 @@ function showReminderNotification(reminder) {
   if (!habit || habit.paused) return;
   const title = `Habitly Reminder · ${habit.name}`;
   const body = `It's time for "${habit.name}".`;
-  if (notificationSupported() && Notification.permission === 'granted') {
-    try {
-      const notification = new Notification(title, { body, icon: `${AS}Habitly Leaf Transparent.png`, tag: `habitly-reminder-${reminder.id}` });
-      notification.onclick = () => { window.focus(); notification.close(); navigate('habits'); };
-    } catch (err) { console.warn('Browser notification failed:', err); }
-  }
+  dispatchBrowserReminderNotification(title, body, 'habits', reminder.id);
   playReminderSound(reminder.sound || 'gentle');
   toast(`⏰ ${habit.name} reminder`);
 }
@@ -1333,7 +1423,10 @@ function checkReminderNotifications(force = false) {
     if (notified[key]) return;
     notified[key] = Date.now();
     changed = true;
-    if (state.settings?.notifications?.daily !== false) showReminderNotification(reminder);
+    const reminderAllowed = reminder.eventId
+      ? state.settings?.notifications?.eventReminders !== false
+      : state.settings?.notifications?.habitReminders !== false;
+    if (reminderAllowed) showReminderNotification(reminder);
   });
   const cutoff = Date.now() - 45 * 24 * 60 * 60 * 1000;
   const trimmed = Object.fromEntries(Object.entries(notified).filter(([, ts]) => Number(ts) >= cutoff));
@@ -1403,62 +1496,83 @@ function sidebar(route) { return `<aside class="sidebar"><div class="brand">${lo
 function mobileDrawer(route) { return `<div class="mobile-drawer" id="drawer" aria-hidden="true"><div class="scrim" data-close-drawer></div><aside class="drawer"><div class="drawer-head"><div class="mobile-brand">${logo()}<strong>Habitly</strong></div><button class="drawer-close" data-close-drawer aria-label="Close menu">×</button></div><nav class="main-nav">${navItems.map(([r, t, i]) => `<button class="nav-item ${route === r ? 'active' : ''}" data-route="${r}"><span class="nav-icon">${navIcon(i)}</span><span>${t}</span></button>`).join('')}</nav><div class="sidebar-bottom"><button class="profile-card" data-route="settings" aria-label="Open account settings"><span class="avatar">${avatarMarkup()}</span><span class="profile-copy"><strong>${esc(state.profile?.name || 'Prem Kumar')}</strong><small>View profile</small></span><span class="chevron">${icon('chevron')}</span></button><button class="logout" type="button" data-logout aria-label="Log out of Habitly">${icon('logout')}<span>Log out</span></button></div></aside></div>`; }
 
 function reminderOverviewMarkup(date) {
-  const reminders = (state.reminders || [])
-    .filter(r => r && r.source === 'manual')
-    .map(r => {
-      const habit = state.habits.find(h => h.id === r.habitId);
-      return { r, habit };
-    })
-    .filter(x => x.habit);
+  // This panel is an UPCOMING REMINDER view, not an event list.
+  // Only enabled reminders with a real next occurrence on the selected day
+  // belong here. Calendar events without reminders must never appear here,
+  // and disabled/expired reminders must not be presented as upcoming.
+  const selectedDate = String(date || calendarSelectedDate || todayISO());
+  const now = new Date();
+  const rows = [];
 
-  const events = (state.events || [])
-    .filter(e => e.date === date)
-    .sort((a,b) => String(a.time || '').localeCompare(String(b.time || '')));
+  for (const reminder of (state.reminders || [])) {
+    if (!reminder || reminder.source !== 'manual' || reminder.enabled === false) continue;
+    const next = nextReminderOccurrence(reminder, now);
+    if (!next || dateISO(next) !== selectedDate) continue;
 
-  if (!reminders.length && !events.length) {
+    if (reminder.eventId) {
+      if (state.settings?.notifications?.eventReminders === false) continue;
+      const event = reminderEventFor(reminder);
+      if (!event) continue;
+      rows.push({
+        kind: 'event',
+        id: reminder.id,
+        eventId: event.id,
+        title: event.title,
+        emoji: event.emoji || '📅',
+        time: next,
+        reminderTime: formatTimeShort(next),
+        detail: `Event ${formatTimeShort(event.time)} · Reminder ${formatTimeShort(next)} · ${reminderSoundLabel(reminder.sound)}`,
+        sortKey: next.getTime()
+      });
+    } else {
+      if (state.settings?.notifications?.habitReminders === false) continue;
+      const habit = reminderHabitFor(reminder);
+      if (!habit || habit.paused) continue;
+      rows.push({
+        kind: 'habit',
+        id: reminder.id,
+        title: habit.name,
+        emoji: habit.emoji || '🔔',
+        time: next,
+        reminderTime: formatTimeShort(next),
+        detail: `${reminderDaysLabel(reminder.days)} · ${reminderSoundLabel(reminder.sound)}`,
+        sortKey: next.getTime()
+      });
+    }
+  }
+
+  rows.sort((a, b) => a.sortKey - b.sortKey);
+
+  if (!rows.length) {
     return `
       <div class="reminder-overview-empty">
         <div class="reminder-empty-icon">${icon('bell')}</div>
-        <strong>No reminders for now</strong>
-        <small>Add a reminder for any active habit. You can edit its time, tone, and status later.</small>
+        <strong>No upcoming reminders</strong>
+        <small>Events appear here only when their reminder is enabled. Habit reminders appear when their next scheduled occurrence falls on this day.</small>
         <button class="primary-btn reminder-add-btn" type="button" data-add-reminder>
           <span aria-hidden="true">+</span><span>Add Reminder</span>
         </button>
       </div>`;
   }
 
-  const reminderRows = reminders.map(({r, habit}) => `
-    <div class="calendar-reminder-row ${r.enabled === false ? 'is-disabled' : ''}">
-      <span class="reminder-emoji">${esc(habit.emoji || '🔔')}</span>
-      <span class="reminder-copy">
-        <strong>${esc(habit.name)}</strong>
-        <small>${esc(formatReminderTime(r.time))} · ${esc(reminderSoundLabel(r.sound))} · ${esc((() => { const n = nextReminderOccurrence(r); const iso = n ? dateISO(n) : ''; return iso === todayISO() ? 'Today' : iso ? formatDate(iso) : ''; })())}</small>
-      </span>
-      <label class="mini-switch" title="${r.enabled === false ? 'Enable reminder' : 'Disable reminder'}">
-        <input type="checkbox" data-toggle-reminder="${esc(r.id)}" ${r.enabled !== false ? 'checked' : ''}>
-        <i></i>
-      </label>
-      <button class="reminder-edit-btn" type="button" data-edit-reminder="${esc(r.id)}" aria-label="Edit ${esc(habit.name)}">${icon('chevron')}</button>
-    </div>`).join('');
-
-  const eventRows = events.map(e => {
-    const eventReminder = state.reminders.find(r => r.eventId === e.id && r.source === 'manual');
-    return `
-    <div class="calendar-reminder-row">
-      <span class="reminder-emoji">${esc(e.emoji || '📅')}</span>
-      <span class="reminder-copy">
-        <strong>${esc(e.title)}</strong>
-        <small>${esc(formatTime(e.time) || 'All day')} · ${eventReminder ? `Reminder ${esc(formatReminderTime(eventReminder.time))}` : 'Calendar event'}</small>
-      </span>
-      ${eventReminder ? `<button class="reminder-edit-btn" type="button" data-edit-reminder="${esc(eventReminder.id)}" aria-label="Edit reminder for ${esc(e.title)}">${icon('chevron')}</button>` : ''}
-      <button class="icon-delete" type="button" data-delete-event="${esc(e.id)}" aria-label="Delete event">${icon('trash')}</button>
-    </div>`;
-  }).join('');
-
   return `
     <div class="reminder-overview-list">
-      ${reminderRows || ''}
-      ${eventRows || ''}
+      ${rows.map(row => `
+        <div class="calendar-reminder-row">
+          <span class="reminder-emoji">${esc(row.emoji)}</span>
+          <span class="reminder-copy">
+            <strong>${esc(row.title)}</strong>
+            <small>${esc(row.reminderTime)} · ${esc(row.detail)}</small>
+          </span>
+          <label class="mini-switch" title="Disable reminder">
+            <input type="checkbox" data-toggle-reminder="${esc(row.id)}" checked>
+            <i></i>
+          </label>
+          ${row.kind === 'event'
+            ? `<button class="reminder-edit-btn" type="button" data-edit-event-reminder="${esc(row.eventId)}" aria-label="Edit reminder for ${esc(row.title)}">${icon('edit')}</button>`
+            : `<button class="reminder-edit-btn" type="button" data-edit-reminder="${esc(row.id)}" aria-label="Edit ${esc(row.title)} reminder">${icon('edit')}</button>`}
+          <button class="icon-delete reminder-overview-delete" type="button" data-delete-reminder="${esc(row.id)}" aria-label="Delete reminder for ${esc(row.title)}" title="Delete reminder">${icon('trash')}</button>
+        </div>`).join('')}
     </div>
     <button class="primary-btn reminder-add-btn" type="button" data-add-reminder>
       <span aria-hidden="true">+</span><span>Add Reminder</span>
@@ -1473,23 +1587,44 @@ function formatReminderTime(value) {
 function reminderSoundLabel(value) {
   return ({ gentle:'Gentle Bell', chime:'Soft Chime', calm:'Calm', classic:'Classic', simple:'Simple', bright:'Bright', marimba:'Marimba', digital:'Digital', none:'No Sound' }[value] || 'Gentle Bell');
 }
+function reminderDaysLabel(days) {
+  const labels = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  const values = normalizeReminderDays(days);
+  if (values.length === 7) return 'Every day';
+  return values.map(d => labels[d]).join(' · ');
+}
+function eventReminderTimeValue(date, time, offsetMinutes = 0) {
+  const parsed = parseTime24(time);
+  if (!date || !parsed) return parsed || '';
+  const base = new Date(`${date}T${parsed}`);
+  if (Number.isNaN(base.getTime())) return parsed;
+  base.setMinutes(base.getMinutes() - (Number(offsetMinutes) || 0));
+  return `${String(base.getHours()).padStart(2,'0')}:${String(base.getMinutes()).padStart(2,'0')}:${String(base.getSeconds()).padStart(2,'0')}`;
+}
 function reminderForm(id) {
-  const reminder = id ? state.reminders.find(r => r.id === id && r.source === 'manual') : null;
+  const eventReminder = id ? state.reminders.find(r => r.id === id && r.source === 'manual' && r.eventId) : null;
+  if (eventReminder) {
+    const event = reminderEventFor(eventReminder);
+    if (event) { eventForm(event.id); return; }
+  }
+  const reminder = id ? state.reminders.find(r => r.id === id && r.source === 'manual' && !r.eventId) : null;
   const habits = state.habits.filter(h => !h.paused || h.id === reminder?.habitId);
   if (!habits.length) { toast('Create a habit first'); return; }
 
   const habitId = reminder?.habitId || habits[0].id;
-  const selectedHabit = state.habits.find(h => h.id === habitId);
+  const days = normalizeReminderDays(reminder?.days || state.settings?.notifications?.defaultHabitDays);
+  const selectedDays = new Set(days);
+  const dayOptions = [[1,'Mon'],[2,'Tue'],[3,'Wed'],[4,'Thu'],[5,'Fri'],[6,'Sat'],[0,'Sun']];
+  const defaultTime = parseTime24(reminder?.time) || parseTime24(state.settings?.notifications?.defaultHabitTime) || '20:00:00';
 
   modal(
-    id ? 'Edit reminder' : 'Add reminder',
-    id ? 'Update or turn off this reminder.' : 'Choose a habit and set a reminder only when you need one.',
+    id ? 'Edit habit reminder' : 'Add habit reminder',
+    id ? 'Update the time, selected days, sound, or status of this habit reminder.' : 'Choose when and on which days Habitly should remind you.',
     `<form class="form" id="reminderForm">
       <div class="field"><label>Habit *</label><select name="habitId" required>${habits.map(h => `<option value="${esc(h.id)}" ${h.id === habitId ? 'selected' : ''}>${esc(h.emoji || '🔔')} ${esc(h.name)}</option>`).join('')}</select></div>
-      <div class="form-grid two">
-        <div class="field"><label>Reminder time *</label><input name="time" type="time" step="1" required value="${esc(parseTime24(reminder?.time) || '20:00:00')}"></div>
-        <div class="field"><label>Reminder sound</label><select name="sound">${[['gentle','Gentle Bell'],['chime','Soft Chime'],['calm','Calm'],['classic','Classic'],['simple','Simple'],['bright','Bright'],['marimba','Marimba'],['digital','Digital'],['none','No Sound']].map(([v,t]) => `<option value="${v}" ${v === (reminder?.sound || 'gentle') ? 'selected' : ''}>${t}</option>`).join('')}</select><button type="button" class="secondary-btn reminder-preview-btn" id="previewReminderSound">▶ Preview sound</button></div>
-      </div>
+      <div class="field"><label>Reminder time *</label><input name="time" type="time" step="1" required value="${esc(defaultTime)}"></div>
+      <div class="field"><label>Repeat on</label><div class="reminder-day-picker" role="group" aria-label="Days for habit reminder">${dayOptions.map(([v,label]) => `<label class="reminder-day"><input type="checkbox" name="days" value="${v}" ${selectedDays.has(v) ? 'checked' : ''}><span>${label}</span></label>`).join('')}</div><small class="field-help">The reminder will use the next selected day after the current time.</small></div>
+      <div class="field"><label>Reminder sound</label><div class="form-grid two"><select name="sound">${[['gentle','Gentle Bell'],['chime','Soft Chime'],['calm','Calm'],['classic','Classic'],['simple','Simple'],['bright','Bright'],['marimba','Marimba'],['digital','Digital'],['none','No Sound']].map(([v,t]) => `<option value="${v}" ${v === (reminder?.sound || 'gentle') ? 'selected' : ''}>${t}</option>`).join('')}</select><button type="button" class="secondary-btn reminder-preview-btn" id="previewReminderSound">▶ Preview sound</button></div></div>
       ${id ? `<label class="switch-row"><span><b>Reminder enabled</b><small>Turn this reminder off without deleting it.</small></span><input type="checkbox" name="enabled" ${reminder?.enabled !== false ? 'checked' : ''}><i></i></label>` : ''}
       <div class="form-actions"><button type="button" class="secondary-btn" data-modal-close>Cancel</button>${id ? '<button type="button" class="danger-btn" id="deleteReminder">Delete Reminder</button>' : ''}<button class="primary-btn">${id ? 'Save Changes' : 'Add Reminder'} →</button></div>
     </form>`
@@ -1506,36 +1641,37 @@ function reminderForm(id) {
     e.preventDefault();
     const fd = new FormData(form);
     const selectedHabitId = String(fd.get('habitId') || '');
-    const time = String(fd.get('time') || '');
+    const time = parseTime24(fd.get('time'));
     const sound = String(fd.get('sound') || 'gentle');
     const selected = state.habits.find(h => h.id === selectedHabitId);
-    if (!selectedHabitId || !time || !selected) { toast('Choose a habit and reminder time'); return; }
+    const selectedDays = normalizeReminderDays(fd.getAll('days').map(Number));
+    if (!selectedHabitId || !time || !selected || !selectedDays.length) { toast('Choose a habit, time, and at least one day'); return; }
 
     if (id) {
       const existing = state.reminders.find(r => r.id === id);
-      if (existing) Object.assign(existing, { habitId: selectedHabitId, time, sound, enabled: fd.get('enabled') === 'on', source: 'manual', updatedAt: new Date().toISOString() });
+      if (existing) Object.assign(existing, { habitId: selectedHabitId, time, days: selectedDays, sound, enabled: fd.get('enabled') === 'on', source: 'manual', updatedAt: new Date().toISOString() });
     } else {
-      const existing = state.reminders.find(r => r.habitId === selectedHabitId && r.source === 'manual');
-      if (existing) Object.assign(existing, { time, sound, enabled: true, source: 'manual', updatedAt: new Date().toISOString() });
-      else state.reminders.push({ id: uid('r'), habitId: selectedHabitId, time, sound, enabled: true, source: 'manual', updatedAt: new Date().toISOString() });
+      const existing = state.reminders.find(r => r.habitId === selectedHabitId && r.source === 'manual' && !r.eventId);
+      if (existing) Object.assign(existing, { time, days: selectedDays, sound, enabled: true, source: 'manual', updatedAt: new Date().toISOString() });
+      else state.reminders.push({ id: uid('r'), habitId: selectedHabitId, time, days: selectedDays, sound, enabled: true, source: 'manual', updatedAt: new Date().toISOString() });
     }
-    save(); closeModal(); render(); toast(id ? 'Reminder updated' : 'Reminder added');
+    save(); closeModal(); render(); checkReminderNotifications(true); refreshReminderUi(); toast(id ? 'Reminder updated' : 'Reminder added');
   });
 
   document.getElementById('deleteReminder')?.addEventListener('click', () => {
-    const now = new Date().toISOString();
-    state.reminders = state.reminders.filter(r => r.id !== id);
-    state.syncMeta = state.syncMeta || clone(defaultState.syncMeta);
-    state.syncMeta.deleted = state.syncMeta.deleted || clone(defaultState.syncMeta.deleted);
-    state.syncMeta.deleted.reminders = state.syncMeta.deleted.reminders || {};
-    state.syncMeta.deleted.reminders[id] = now;
-    save(); closeModal(); render(); toast('Reminder deleted');
+    if (deleteReminderById(id)) { closeModal(); render(); toast('Reminder deleted'); }
   });
+}
+function nextEventOccurrence(event, from = new Date()) {
+  if (!event || !event.date || !event.time) return null;
+  const base = new Date(`${event.date}T${parseTime24(event.time) || '00:00:00'}`);
+  return Number.isNaN(base.getTime()) || base.getTime() < from.getTime() ? null : base;
 }
 function nextEventReminderOccurrence(reminder, from = new Date()) {
   const event = reminderEventFor(reminder);
   if (!event) return null;
-  const base = new Date(`${event.date}T${parseTime24(event.time) || '00:00:00'}`);
+  const base = nextEventOccurrence(event, from);
+  if (!base) return null;
   base.setMinutes(base.getMinutes() - (Number(reminder.offsetMinutes) || 0));
   return base.getTime() >= from.getTime() ? base : null;
 }
@@ -1544,28 +1680,48 @@ function nextReminderOccurrence(reminder, from = new Date()) {
   if (reminder.eventId) return nextEventReminderOccurrence(reminder, from);
   const t = parseTime24(reminder.time);
   if (!t) return null;
+  const days = normalizeReminderDays(reminder.days);
   const [hours, minutes, seconds] = t.split(':').map(Number);
-  const now = new Date(from);
-  const candidate = new Date(now); candidate.setHours(hours, minutes, seconds, 0);
-  if (candidate.getTime() <= now.getTime()) candidate.setDate(candidate.getDate() + 1);
-  return candidate;
+  const base = new Date(from);
+  for (let offset = 0; offset <= 7; offset++) {
+    const candidate = new Date(base);
+    candidate.setDate(base.getDate() + offset);
+    candidate.setHours(hours, minutes, seconds, 0);
+    if (candidate.getTime() <= from.getTime()) continue;
+    if (days.includes(candidate.getDay())) return candidate;
+  }
+  return null;
 }
 function reminderData() {
   const now = new Date(), today = todayISO();
+  // The bell is a combined "Events + Reminders" surface. Every future event
+  // counts once, whether or not a reminder was configured for that event.
   const eventItems = (state.events || [])
-    .filter(e => String(e.date || '') >= today)
     .map(e => {
+      const nextEvent = nextEventOccurrence(e, now);
+      if (!nextEvent) return null;
       const linked = state.reminders.find(r => r.eventId === e.id && r.source === 'manual' && r.enabled !== false);
-      if (!linked) return null;
-      const next = nextReminderOccurrence(linked, now);
-      if (!next) return null;
-      const nextTime = `${String(next.getHours()).padStart(2,'0')}:${String(next.getMinutes()).padStart(2,'0')}:${String(next.getSeconds()).padStart(2,'0')}`;
+      const displayTime = linked
+        ? nextReminderOccurrence(linked, now)
+        : nextEvent;
+      // A reminder can be in the past while the event itself is still upcoming
+      // (for example, "30 minutes before"). The event still belongs in the bell.
       return {
-        id: linked.id, eventId:e.id, emoji:e.emoji || '📅', title:e.title,
-        date:dateISO(next), displayDate:formatDate(dateISO(next)), time:formatTime(nextTime), kind:'Event',
-        sortKey:next.getTime(), hasReminder:true
+        id: e.id,
+        eventId: e.id,
+        reminderId: linked?.id || null,
+        emoji:e.emoji || '📅',
+        title:e.title,
+        date:dateISO(nextEvent),
+        displayDate:formatDate(dateISO(nextEvent)),
+        time:formatTime(`${String(nextEvent.getHours()).padStart(2,'0')}:${String(nextEvent.getMinutes()).padStart(2,'0')}:${String(nextEvent.getSeconds()).padStart(2,'0')}`),
+        reminderTime: displayTime ? formatTime(`${String(displayTime.getHours()).padStart(2,'0')}:${String(displayTime.getMinutes()).padStart(2,'0')}:${String(displayTime.getSeconds()).padStart(2,'0')}`) : null,
+        kind:'Event',
+        sortKey:nextEvent.getTime(),
+        hasReminder:!!linked
       };
     }).filter(Boolean).sort((a,b) => a.sortKey - b.sortKey);
+
   const habits = (state.reminders || [])
     .filter(r => r && r.source === 'manual' && r.enabled !== false && !r.eventId)
     .map(r => {
@@ -1579,22 +1735,33 @@ function reminderData() {
 }
 function eventNotificationCount() {
   const data = reminderData();
-  return data.events.length + data.habits.length;
+  const notifications = state.settings?.notifications || defaultState.settings.notifications;
+  // Event count is independent of the event's reminder/offset. An event with
+  // no reminder still counts, while an event with a reminder counts only once.
+  const events = data.events.length;
+  const habits = notifications.habitReminders !== false ? data.habits.length : 0;
+  return events + habits;
 }
 
 function reminderSectionMarkup(title, items, emptyText, options = {}) {
-  const { editable = false } = options;
+  const { editable = false, events = false } = options;
   return `<section class="reminder-section">
     <div class="reminder-section-head"><strong>${esc(title)}</strong><span>${items.length}</span></div>
     ${items.length ? `<div class="reminder-list">${items.map(i => {
-      const action = editable
-        ? `data-edit-reminder="${esc(i.id)}"`
-        : `data-route="calendar"`;
-      return `<button class="reminder-item ${editable ? 'is-habit-reminder' : 'is-event-reminder'}" ${action}>
-        <span class="reminder-emoji">${esc(i.emoji)}</span>
-        <span class="reminder-copy"><strong>${esc(i.title)}</strong><small>${esc(formatTimeShort(i.time))}</small></span>
-        <span class="reminder-dot"></span>
-      </button>`;
+      const action = editable ? `data-edit-reminder="${esc(i.id)}"` : `data-edit-event-reminder="${esc(i.eventId || '')}"`;
+      const deleteButton = events && i.hasReminder
+        ? `<button class="reminder-delete-btn" type="button" data-delete-reminder="${esc(i.reminderId)}" aria-label="Delete reminder for ${esc(i.title)}" title="Delete reminder">${icon('trash')}</button>`
+        : editable
+          ? `<button class="reminder-delete-btn" type="button" data-delete-reminder="${esc(i.id)}" aria-label="Delete reminder for ${esc(i.title)}" title="Delete reminder">${icon('trash')}</button>`
+          : '';
+      return `<div class="reminder-item-row">
+        <button class="reminder-item ${editable ? 'is-habit-reminder' : 'is-event-reminder'}" type="button" ${action}>
+          <span class="reminder-emoji">${esc(i.emoji)}</span>
+          <span class="reminder-copy"><strong>${esc(i.title)}</strong><small>${esc(formatTimeShort(i.time))}${events && i.hasReminder ? ' · Reminder set' : ''}</small></span>
+          <span class="reminder-dot"></span>
+        </button>
+        ${deleteButton}
+      </div>`;
     }).join('')}</div>` : `<div class="reminder-section-empty">${esc(emptyText)}</div>`}
   </section>`;
 }
@@ -1603,12 +1770,12 @@ function reminderPanel() {
   const data = reminderData();
   return `<div class="reminder-popover hidden" id="reminderPopover" role="dialog" aria-label="Reminders">
     <div class="reminder-head">
-      <div><strong>Reminders</strong><small>Events and habit reminders you have set</small></div>
+      <div><strong>Reminders</strong><small>Upcoming events and habit reminders</small></div>
       <button class="reminder-close" data-close-reminders aria-label="Close reminders">×</button>
     </div>
     <div class="reminder-sections">
-      ${reminderSectionMarkup('Reminder Events', data.events, 'No calendar events yet.')}
-      ${reminderSectionMarkup('Reminder Habits', data.habits, 'No habit reminders are set.', { editable: true })}
+      ${reminderSectionMarkup('Upcoming Events', data.events, 'No upcoming events.', { events: true })}
+      ${reminderSectionMarkup('Habit Reminders', data.habits, 'No habit reminders are set.', { editable: true })}
     </div>
     <button class="reminder-view" data-route="calendar">View calendar →</button>
   </div>`;
@@ -1641,7 +1808,7 @@ function habitRow(h, opts = {}) {
   </article>`;
 }
 
-function dashboard() { const habits = state.habits.filter(h => !h.paused), total = habits.length, avg = dailyProgress(todayISO()), completed = habits.filter(h => pct(h) >= 100).length, weekly = weeklyActivityData(new Date()), recorded = weekly.filter(x => x.value !== null), weekAvg = recorded.length ? Math.round(recorded.reduce((a, x) => a + x.value, 0) / recorded.length) : 0; return shell('dashboard', `${greeting()}<section class="stats-grid dashboard-stats"><article class="stat-card"><div class="progress-ring" style="--p:${avg}%"><span>${avg}%</span></div><h2>Today's Progress</h2><p>${avg >= 75 ? 'Great going!' : 'Keep building!'}</p></article><article class="stat-card"><div class="stat-emoji fire">🔥</div><div class="big-number">${currentStreak()}</div><h2>Current Streak</h2><p>days</p></article><article class="stat-card"><div class="stat-emoji trophy">🏆</div><div class="big-number">${bestStreak()}</div><h2>Best Streak</h2><p>days</p></article><article class="stat-card"><div class="stat-emoji check">✓</div><div class="big-number">${completed}</div><h2>Completed Today</h2><p>out of ${total}</p></article><article class="stat-card"><div class="stat-emoji trend">↗</div><div class="big-number">${weekAvg}%</div><h2>Consistency</h2><p>This week</p></article></section><section class="dashboard-grid"><article class="panel habits-panel"><div class="panel-header"><div><h2>Today's Habits</h2><div class="filters" data-filter-group="dashboard"><button class="filter active" data-filter="All">All</button><button class="filter" data-filter="Health">Health</button><button class="filter" data-filter="Fitness">Fitness</button><button class="filter" data-filter="Study">Study</button><button class="filter" data-filter="Personal">Personal</button><button class="filter" data-filter="Mindfulness">Mindfulness</button></div></div><button class="primary-btn" data-open-habit>+ Add Habit</button></div><div class="habit-list" id="dashboardHabits">${habits.map(h => habitRow(h)).join('')}</div><button class="view-link" data-route="habits">View all habits →</button></article><div class="right-column"><article class="panel weekly-panel"><div class="panel-title-row"><div><h2>Weekly Activity</h2><p class="panel-subtitle">Actual recorded completion this week</p></div><span class="week-total">${weekAvg}%</span></div><div class="activity-chart" id="dashboardWeeklyChart">${weekly.map(x => `<div class="activity-day ${x.value === null ? 'future' : ''}"><span class="bar-value">${x.value === null ? '' : x.value + '%'}</span><div class="bar"><i style="height:${x.value === null ? 0 : x.value}%"></i></div><b>${x.label}</b></div>`).join('')}</div></article><article class="panel upcoming"><div class="upcoming-head"><h3>Upcoming</h3><button class="text-btn" data-route="calendar">View all</button></div>${state.events.slice().sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time)).slice(0, 3).map(e => `<div class="up-item"><span class="up-icon">${icon('bell')}</span><span class="up-copy"><strong>${esc(e.title)}</strong><small>${esc(formatDate(e.date))}</small></span><span class="up-time">${esc(formatTime(e.time))}</span></div>`).join('') || '<div class="muted-copy">No upcoming events.</div>'}<button class="view-schedule" data-route="calendar">View full schedule →</button></article></div></section>`); }
+function dashboard() { const habits = state.habits.filter(h => !h.paused), total = habits.length, avg = dailyProgress(todayISO()), completed = habits.filter(h => pct(h) >= 100).length, weekly = weeklyActivityData(new Date()), recorded = weekly.filter(x => x.value !== null), weekAvg = recorded.length ? Math.round(recorded.reduce((a, x) => a + x.value, 0) / recorded.length) : 0; return shell('dashboard', `${greeting()}<section class="stats-grid dashboard-stats"><article class="stat-card"><div class="progress-ring" style="--p:${avg}%"><span>${avg}%</span></div><h2>Today's Progress</h2><p>${avg >= 75 ? 'Great going!' : 'Keep building!'}</p></article><article class="stat-card"><div class="stat-emoji fire">🔥</div><div class="big-number">${currentStreak()}</div><h2>Current Streak</h2><p>days</p></article><article class="stat-card"><div class="stat-emoji trophy">🏆</div><div class="big-number">${bestStreak()}</div><h2>Best Streak</h2><p>days</p></article><article class="stat-card"><div class="stat-emoji check">✓</div><div class="big-number">${completed}</div><h2>Completed Today</h2><p>out of ${total}</p></article><article class="stat-card"><div class="stat-emoji trend">↗</div><div class="big-number">${weekAvg}%</div><h2>Consistency</h2><p>This week</p></article></section><section class="dashboard-grid"><article class="panel habits-panel"><div class="panel-header"><div><h2>Today's Habits</h2><div class="filters" data-filter-group="dashboard"><button class="filter active" data-filter="All">All</button><button class="filter" data-filter="Health">Health</button><button class="filter" data-filter="Fitness">Fitness</button><button class="filter" data-filter="Study">Study</button><button class="filter" data-filter="Personal">Personal</button><button class="filter" data-filter="Mindfulness">Mindfulness</button></div></div><button class="primary-btn" data-open-habit>+ Add Habit</button></div><div class="habit-list" id="dashboardHabits">${habits.map(h => habitRow(h)).join('')}</div><button class="view-link" data-route="habits">View all habits →</button></article><div class="right-column"><article class="panel weekly-panel"><div class="panel-title-row"><div><h2>Weekly Activity</h2><p class="panel-subtitle">Actual recorded completion this week</p></div><span class="week-total">${weekAvg}%</span></div><div class="activity-chart" id="dashboardWeeklyChart">${weekly.map(x => `<div class="activity-day ${x.value === null ? 'future' : ''}"><span class="bar-value">${x.value === null ? '' : x.value + '%'}</span><div class="bar"><i style="height:${x.value === null ? 0 : x.value}%"></i></div><b>${x.label}</b></div>`).join('')}</div></article></div></section>`); }
 
 function habitsPage() {
   const avg = Math.round(state.habits.reduce((a, h) => a + pct(h), 0) / Math.max(1, state.habits.length));
@@ -1865,7 +2032,7 @@ function storageMode() { return accountStorageMode(); }
 function backupStatusText(d) {
   if (!d?.connected) return 'Connect Google Drive to start cloud backups.';
   const pending = pendingMutations(state).length > 0 || Object.values(state.syncMeta?.pending || {}).some(Boolean);
-  if (d.autoDaily === false) return pending ? 'Automatic backup is off · changes are saved on this device.' : 'Automatic backup is off.';
+  if (d.autoDaily === false) return pending ? 'Automatic backup is off · cloud sync remains active.' : 'Automatic backup is off · your cloud data is still synchronized.';
   if (pending) return googleDriveBusy ? 'Syncing your latest changes…' : 'Changes waiting to sync…';
   const backupStamp = d.lastBackupAt || '';
   const backupDay = backupStamp ? dateISO(new Date(backupStamp)) : (d.lastBackupDate || '');
@@ -1962,7 +2129,7 @@ function settingsSection(key) {
   if (key === 'account') return `<article class="settings-card settings-account"><div class="settings-card-head"><div class="settings-heading-icon purple">${icon('user')}</div><div><h2>Account</h2><p>Update your personal information and profile picture.</p></div></div><form id="profileForm" class="settings-form"><div class="profile-editor"><div class="profile-avatar-wrap"><div class="profile-avatar" id="profileAvatar">${p.avatar ? `<img src="${esc(p.avatar)}" alt="Profile picture">` : `<span class="avatar-initials">${esc((p.name || 'Prem Kumar').trim().split(/\s+/).map(x => x[0]).slice(0, 2).join('').toUpperCase() || 'PK')}</span>`}</div><label class="avatar-upload" title="Change profile picture">${icon('upload')}<input id="avatarInput" type="file" accept="image/png,image/jpeg,image/webp"></label><small>PNG, JPG or WebP · max 10 MB · crop supported</small></div><div class="settings-fields"><div class="field"><label>Full name</label><input name="name" value="${esc(p.name)}" required></div><div class="field"><label>Email address</label><input name="email" type="email" value="${esc(p.email)}" required></div></div></div><div class="settings-save-row"><button class="primary-btn">Save changes ${icon('arrow')}</button></div></form></article>
  <article class="settings-card install-app-card"><div class="settings-card-head"><div class="settings-heading-icon purple">${icon('download')}</div><div><h2>Install Habitly</h2><p>Use Habitly like an app on your phone with a home-screen icon and standalone experience.</p></div></div><div id="installAppContent"></div></article>
  <div class="settings-two-col"><article class="settings-card"><div class="settings-card-head compact"><div class="settings-heading-icon green">${icon('shield')}</div><div><h2>Account status</h2><p>Your Habitly profile is ready to use.</p></div><span class="status-pill">Good</span></div><div class="info-list"><div><span>${icon('check')}Profile information</span><b>Complete</b></div><div><span>${icon('database')}Local data</span><b>Protected</b></div></div></article><article class="settings-card about-mini"><div class="settings-brand-mark">${logo()}</div><h2>Habitly by PRK</h2><p>Build better habits. Achieve your goals. One consistent day at a time.</p></article></div>`;
-  if (key === 'notifications') return `<article class="settings-card"><div class="settings-card-head"><div class="settings-heading-icon purple">${icon('bell')}</div><div><h2>Notifications</h2><p>Choose when Habitly should remind you.</p></div></div><div class="settings-options">${[['daily', 'Daily reminders', 'Get reminded about your habits', 'bell'], ['motivational', 'Motivational messages', 'Receive helpful daily motivation', 'star'], ['weekly', 'Weekly summary', 'Get a weekly progress summary', 'chart'], ['goal', 'Goal reminders', 'Stay on track with important goals', 'trophy']].map(([k, t, d, i]) => `<label class="settings-option"><span class="option-icon">${icon(i === 'star' ? 'plusCircle' : i)}</span><span><b>${t}</b><small>${d}</small></span><input type="checkbox" data-notify="${k}" ${s.notifications[k] ? 'checked' : ''}><i class="toggle"></i></label>`).join('')}</div><div class="form-actions notification-actions"><button type="button" class="secondary-btn" id="enableBrowserNotifications">Enable browser notifications</button></div><div class="settings-note">Reminder checks run automatically while Habitly is open. Browser notifications require permission. Sound previews are available in each reminder editor.</div></article>`;
+  if (key === 'notifications') return `<article class="settings-card"><div class="settings-card-head"><div class="settings-heading-icon purple">${icon('bell')}</div><div><h2>Notifications</h2><p>Control habit and event reminders independently and choose their defaults.</p></div></div><div class="settings-options">${[['habitReminders', 'Habit reminders', 'Allow scheduled reminders for your habits.', 'bell'], ['eventReminders', 'Event reminders', 'Allow scheduled reminders for calendar events.', 'calendar'], ['motivational', 'Motivational messages', 'Receive helpful daily motivation.', 'star'], ['weekly', 'Weekly summary', 'Get a weekly progress summary.', 'chart'], ['goal', 'Goal reminders', 'Stay on track with important goals.', 'trophy']].map(([k, t, d, i]) => `<label class="settings-option"><span class="option-icon">${icon(i === 'star' ? 'plusCircle' : i)}</span><span><b>${t}</b><small>${d}</small></span><input type="checkbox" data-notify="${k}" ${s.notifications[k] !== false ? 'checked' : ''}><i class="toggle"></i></label>`).join('')}</div><div class="settings-subsection"><div class="settings-subhead"><b>Reminder defaults</b><small>Used when you create a new reminder. Existing reminders are not changed.</small></div><div class="settings-preference-grid"><div class="field"><label>Default event reminder</label><select id="prefDefaultEventOffset">${[[0,'At event time'],[5,'5 minutes before'],[10,'10 minutes before'],[15,'15 minutes before'],[30,'30 minutes before'],[60,'1 hour before'],[1440,'1 day before']].map(([v,t]) => `<option value="${v}" ${Number(s.notifications.defaultEventOffset)===v?'selected':''}>${t}</option>`).join('')}</select></div><div class="field"><label>Default habit reminder time</label><input id="prefDefaultHabitTime" type="time" step="1" value="${esc(parseTime24(s.notifications.defaultHabitTime) || '20:00:00')}"></div></div><div class="field"><label>Default habit reminder days</label><div class="reminder-day-picker settings-day-picker">${[[1,'Mon'],[2,'Tue'],[3,'Wed'],[4,'Thu'],[5,'Fri'],[6,'Sat'],[0,'Sun']].map(([v,label]) => `<label class="reminder-day"><input type="checkbox" name="defaultHabitDays" value="${v}" ${normalizeReminderDays(s.notifications.defaultHabitDays).includes(v)?'checked':''}><span>${label}</span></label>`).join('')}</div></div></div><div class="notification-permission-card"><div><b>Browser notification permission</b><small>${typeof Notification === 'undefined' ? 'Not supported by this browser.' : Notification.permission === 'granted' ? 'Allowed — Habitly can show browser notifications.' : Notification.permission === 'denied' ? 'Blocked — enable notifications in browser settings.' : 'Not enabled yet.'}</small></div><button type="button" class="secondary-btn" id="enableBrowserNotifications">${typeof Notification !== 'undefined' && Notification.permission === 'granted' ? 'Notifications enabled' : 'Enable notifications'}</button></div><div class="settings-note">Habitly uses browser notifications and the reminder service for scheduled alerts. Keep browser notifications allowed if you want reminder alerts while Habitly is open or running in the background. Event reminders default to the event time for new events, and habit reminders default to 8:00 PM every day.</div></article>`;
   if (key === 'habits') return `<article class="settings-card"><div class="settings-card-head"><div class="settings-heading-icon purple">${icon('target')}</div><div><h2>Habit Preferences</h2><p>Customize how your habits are displayed and tracked.</p></div></div><div class="settings-preference-grid"><div class="field"><label>Time format</label><select id="prefTimeFormat"><option value="12h" ${s.timeFormat !== '24h' ? 'selected' : ''}>12-hour (AM/PM)</option><option value="24h" ${s.timeFormat === '24h' ? 'selected' : ''}>24-hour</option></select></div><div class="field"><label>Default habit view</label><select id="prefDefaultView"><option>All Habits</option><option>Active</option><option>Completed</option><option>Paused</option></select></div><div class="field"><label>Week starts on</label><select id="prefWeekStart"><option>Monday</option><option>Sunday</option></select></div></div><div class="settings-options compact-options"><label class="settings-option"><span class="option-icon">${icon('check')}</span><span><b>Auto-complete at target</b><small>Mark quantity habits complete when they reach their target.</small></span><input type="checkbox" id="prefAuto" ${s.habits.autoComplete ? 'checked' : ''}><i class="toggle"></i></label><label class="settings-option"><span class="option-icon">${icon('pause')}</span><span><b>Keep streaks during pauses</b><small>Paused habits do not break an existing streak.</small></span><input type="checkbox" id="prefStreak" ${s.habits.keepStreak ? 'checked' : ''}><i class="toggle"></i></label><label class="settings-option"><span class="option-icon">${icon('plus')}</span><span><b>Show quick quantity controls</b><small>Keep plus and minus controls visible on habit cards.</small></span><input type="checkbox" id="prefQuick" ${s.habits.quickQuantity ? 'checked' : ''}><i class="toggle"></i></label></div></article>`;
   if (key === 'security') return `<article class="settings-card"><div class="settings-card-head"><div class="settings-heading-icon blue">${icon('shield')}</div><div><h2>Privacy & Security</h2><p>Protect your account and control access to your local Habitly data.</p></div></div><div class="security-status"><span class="security-icon">${icon('shield')}</span><div><b>Local data protection</b><small>Habitly keeps a local working copy in this browser and, for cloud-enabled accounts, synchronizes through the authenticated Supabase data layer.</small></div><span class="status-pill">Active</span></div><div class="security-grid"><button class="security-action" data-security="sessions"><span>${icon('desktop')}</span><b>Active session</b><small>This browser</small></button><button class="security-action" data-security="clear"><span>${icon('trash')}</span><b>Clear local data</b><small>Requires confirmation</small></button></div><div class="settings-note">There is no server-side login or password system in this frontend, so password/2FA controls are intentionally not presented as fake functionality.</div></article>`;
   if (key === 'data') {
@@ -1976,7 +2143,7 @@ function settingsSection(key) {
       <div class="storage-current"><div><span class="eyebrow">CURRENT STORAGE</span><strong>This device + Cloud sync</strong><small>Habitly is local-first and uses Supabase as the single cross-device data source. Google Drive is backup/restore only.</small></div></div>
        ${mode === 'cloud' ? `<div class="backup-status-line ${cloudSyncError ? 'waiting' : 'ready'}">${icon(cloudSyncError ? 'info' : 'check')}<span>${esc(cloudStatusText())}</span></div>` : ''}
       <div class="backup-actions"><button class="backup-card" id="exportBackup"><span>${icon('download')}</span><b>Export backup</b><small>Download your complete Habitly data as JSON.</small></button><label class="backup-card"><span>${icon('upload')}</span><b>Import backup</b><small>Restore a Habitly JSON backup from this device.</small><input id="importBackup" type="file" accept="application/json,.json"></label></div>
-      ${driveSelected ? `<div class="drive-backup-card"><div class="drive-head"><div class="drive-icon">${icon('cloud')}</div><div><h3>Google Drive Backup</h3><p>Habitly keeps one rolling backup file in your Drive. It updates instead of creating daily files.</p></div><span class="drive-status ${connected ? 'connected' : ''}">${connected ? 'Connected' : 'Not connected'}</span></div><div class="drive-copy"><div><b>Habitly_Backup.json</b><small>${connected ? (d.email ? `Google account: ${esc(d.email)}` : 'Connected to Google Drive') : 'Connect Google Drive to enable cloud backup.'}</small></div><div class="drive-last"><span>Last synced</span><strong>${connected && d.lastBackupAt ? formatBackupTime(d.lastBackupAt) : 'Not backed up yet'}</strong></div></div>${connected ? `<div class="backup-status-line ${d.lastBackupDate === todayISO() ? 'ready' : 'waiting'}">${icon(d.lastBackupDate === todayISO() ? 'check' : 'info')}<span>${esc(status)}</span></div>` : ''}<div class="drive-actions"><button class="primary-btn" id="driveConnect">${icon(connected ? 'refresh' : 'cloud')}${connected ? 'Reconnect Google Drive' : 'Connect Google Drive'}</button>${connected ? `<button class="secondary-btn" id="driveBackupNow">${icon('cloud')} Back up now</button><button class="secondary-btn" id="driveRestore">${icon('download')} Restore backup</button>` : ''}</div>${connected ? `<label class="drive-auto"><span><b>Automatic backup · ${d.autoDaily !== false ? 'On' : 'Off'}</b><small>When enabled, Habitly backs up the latest acknowledged cloud state to the same Google Drive file. Drive is never used as the active sync source.</small></span><input type="checkbox" id="driveAutoDaily" ${d.autoDaily !== false ? 'checked' : ''}><i class="toggle"></i></label>` : ''}<div class="settings-note drive-note">${connected ? 'Only one cloud backup is maintained. No separate daily files are created. Your profile photo is not included in the cloud JSON backup.' : 'Connect Google Drive to enable cloud storage and backup controls.'}</div></div>` : `<div class="settings-note">Google Drive is optional. Connect it here when you want a durable backup/restore copy of your cloud-synchronized data.</div>`}
+      ${driveSelected ? `<div class="drive-backup-card"><div class="drive-head"><div class="drive-icon">${icon('cloud')}</div><div><h3>Google Drive Backup</h3><p>Habitly keeps one rolling backup file in your Drive. It updates instead of creating daily files.</p></div><span class="drive-status ${connected ? 'connected' : ''}">${connected ? 'Connected' : 'Not connected'}</span></div><div class="drive-copy"><div><b>Habitly_Backup.json</b><small>${connected ? (d.email ? `Google account: ${esc(d.email)}` : 'Connected to Google Drive') : 'Connect Google Drive to enable cloud backup.'}</small></div><div class="drive-last"><span>Last synced</span><strong>${connected && d.lastBackupAt ? formatBackupTime(d.lastBackupAt) : 'Not backed up yet'}</strong></div></div>${connected ? `<div class="backup-status-line ${d.lastBackupDate === todayISO() ? 'ready' : 'waiting'}">${icon(d.lastBackupDate === todayISO() ? 'check' : 'info')}<span>${esc(status)}</span></div>` : ''}<div class="drive-actions"><button class="primary-btn" id="driveConnect">${icon(connected ? 'refresh' : 'cloud')}${connected ? 'Reconnect Google Drive' : 'Connect Google Drive'}</button>${connected ? `<button class="secondary-btn" id="driveBackupNow">${icon('cloud')} Back up now</button><button class="secondary-btn" id="driveRestore">${icon('download')} Restore backup</button><button class="danger-btn" id="driveDisconnect">${icon('trash')} Disconnect Drive</button>` : ''}</div>${connected ? `<label class="drive-auto"><span><b>Automatic backup · ${d.autoDaily !== false ? 'On' : 'Off'}</b><small>When enabled, Habitly backs up the latest acknowledged cloud state to the same Google Drive file. Drive is never used as the active sync source.</small></span><input type="checkbox" id="driveAutoDaily" ${d.autoDaily !== false ? 'checked' : ''}><i class="toggle"></i></label>` : ''}<div class="settings-note drive-note">${connected ? 'Only one cloud backup is maintained. No separate daily files are created. Your profile photo is not included in the cloud JSON backup.' : 'Connect Google Drive to enable cloud storage and backup controls.'}</div></div>` : `<div class="settings-note">Google Drive is optional. Connect it here when you want a durable backup/restore copy of your cloud-synchronized data.</div>`}
     </article>`;
   }
   return `<article class="settings-card about-settings"><div class="about-hero"><div class="about-logo"><img src="${AS}Habitly Leaf Transparent.png" alt="Habitly leaf logo"></div><div><span class="eyebrow">HABITLY BY PRK</span><h2>About Habitly</h2><p>Your personal habit and goal tracking companion.</p></div></div><div class="about-copy"><h3>About me</h3><p>I'm Prem Kumar, an Integrated B.Tech–M.Tech Cyber Security student focused on cloud security, secure software and practical cybersecurity engineering. I build hands-on projects to strengthen my skills in secure systems, automation and real-world application development.</p><h3>Why I created Habitly</h3><p>I created Habitly as a practical productivity application that brings habits and long-term goals into one focused workspace. It makes progress visible, measurable and editable while giving me a real-world project for building responsive interfaces, state management, persistence and user-focused software.</p></div><div class="about-links"><a href="https://github.com/prem-cybersecurity" target="_blank" rel="noopener noreferrer" aria-label="Open GitHub">${icon('github')}<span>GitHub</span></a><a href="https://premkumar-portfolio-kohl.vercel.app/" target="_blank" rel="noopener noreferrer" aria-label="Open portfolio"><span>Portfolio</span>${icon('external')}</a><a class="linkedin-link" href="https://www.linkedin.com/in/premkumar-cybersecurity" target="_blank" rel="noopener noreferrer" aria-label="Open LinkedIn">${icon('linkedin')}<span>LinkedIn</span></a></div><small class="version-line">Habitly by PRK · Version ${APP_VERSION}</small></article>`;
@@ -2538,6 +2705,19 @@ function connectDrive() {
   if (!ensureDriveClient()) return;
   requestDriveToken(driveSettings().connected ? '' : 'consent').catch(() => {});
 }
+async function disconnectDrive() {
+  const d = driveSettings();
+  if (!d.connected) return;
+  modal('Disconnect Google Drive', 'Habitly will stop using Google Drive for automatic backups. Your existing Drive backup will not be deleted.', `<div class="confirm-box"><p>This disconnects Habitly from <strong>${esc(d.email || 'your Google Drive')}</strong>. Your Supabase cloud data and local data remain unchanged.</p><p>You can reconnect Google Drive later from Settings.</p><div class="form-actions"><button class="secondary-btn" data-modal-close>Cancel</button><button class="danger-btn" id="confirmDriveDisconnect">Disconnect Drive</button></div></div>`);
+  document.getElementById('confirmDriveDisconnect')?.addEventListener('click', () => {
+    clearTimeout(driveBackupTimer); driveBackupTimer = null; clearTimeout(driveSyncRetryTimer); driveSyncRetryTimer = null;
+    driveUploadQueued = false; driveLoginSyncPending = false; driveLoginSyncBusy = false; driveRemoteMissing = false;
+    driveHydrationConfirmedUserId = ''; driveLoginSyncedUserId = '';
+    googleAccessToken = ''; googleTokenExpiresAt = 0; googleTokenClient = null; driveTokenRequestPromise = null; driveTokenRequestContext = null;
+    d.connected = false; d.email = ''; d.folderId = ''; d.fileId = ''; d.lastBackupDate = ''; d.lastBackupAt = ''; d.lastRemoteUpdatedAt = ''; d.remoteEverSynced = false; d.syncRevision = 0; d.autoDaily = false;
+    save({ skipDrive: true, markDirty: false }); closeModal(); render(); toast('Google Drive disconnected');
+  });
+}
 async function bindDriveSettings(root) {
   const d = driveSettings();
   root.querySelector('#driveConnect')?.addEventListener('click', connectDrive);
@@ -2549,8 +2729,9 @@ async function bindDriveSettings(root) {
     if (currentRoute() === 'settings') render();
   });
   root.querySelector('#driveRestore')?.addEventListener('click', restoreDriveBackup);
-  root.querySelector('#driveAutoDaily')?.addEventListener('change', e => { d.autoDaily = e.target.checked; save(); });
-  if (d.connected && d.autoDaily !== false && d.lastBackupDate !== todayISO() && !cloudStorageSelected()) {
+  root.querySelector('#driveDisconnect')?.addEventListener('click', () => disconnectDrive());
+  root.querySelector('#driveAutoDaily')?.addEventListener('change', e => { d.autoDaily = e.target.checked; save(); if (currentRoute() === 'settings') render(); toast(d.autoDaily ? 'Automatic Google Drive backup enabled' : 'Automatic Google Drive backup disabled'); });
+  if (d.connected && d.autoDaily !== false && d.lastBackupDate !== todayISO()) {
     if (googleAccessToken && Date.now() < googleTokenExpiresAt - 60000) setTimeout(() => uploadDriveBackup({ silent: true }), 250);
     else if (ensureDriveClient()) requestDriveToken('', { silent: true }).catch(() => {});
   }
@@ -2626,7 +2807,13 @@ function initSettings() {
       root.querySelector('#profileForm')?.addEventListener('submit', e => { e.preventDefault(); const fd = new FormData(e.target); state.profile.name = String(fd.get('name') || '').trim() || 'Prem Kumar'; state.profile.email = String(fd.get('email') || '').trim(); save(); render(); toast('Profile updated'); });
       renderInstallOption(root.querySelector('#installAppContent'));
     }
-    if (key === 'notifications') { root.querySelectorAll('[data-notify]').forEach(i => i.addEventListener('change', () => { if (!state.settings) state.settings = clone(defaultState.settings); state.settings.notifications[i.dataset.notify] = i.checked; save(); toast('Notification preference saved'); })); root.querySelector('#enableBrowserNotifications')?.addEventListener('click', enableNotifications); }
+    if (key === 'notifications') {
+      root.querySelectorAll('[data-notify]').forEach(i => i.addEventListener('change', () => { if (!state.settings) state.settings = clone(defaultState.settings); state.settings.notifications = normalizeNotificationSettings(state.settings.notifications); state.settings.notifications[i.dataset.notify] = i.checked; state.settings.notifications.daily = state.settings.notifications.habitReminders; save(); refreshReminderUi(); toast(i.dataset.notify === 'habitReminders' ? (i.checked ? 'Habit reminders enabled' : 'Habit reminders turned off') : i.dataset.notify === 'eventReminders' ? (i.checked ? 'Event reminders enabled' : 'Event reminders turned off') : 'Notification preference saved'); }));
+      root.querySelector('#prefDefaultEventOffset')?.addEventListener('change', e => { s.notifications.defaultEventOffset = Number(e.target.value); save(); toast('Default event reminder updated'); });
+      root.querySelector('#prefDefaultHabitTime')?.addEventListener('change', e => { s.notifications.defaultHabitTime = parseTime24(e.target.value) || '20:00:00'; save(); toast('Default habit reminder time updated'); });
+      root.querySelectorAll('input[name="defaultHabitDays"]').forEach(i => i.addEventListener('change', () => { const checked = [...root.querySelectorAll('input[name="defaultHabitDays"]:checked')].map(x => Number(x.value)); if (!checked.length) { i.checked = true; toast('Select at least one day'); return; } s.notifications.defaultHabitDays = normalizeReminderDays(checked); save(); toast('Default reminder days updated'); }));
+      root.querySelector('#enableBrowserNotifications')?.addEventListener('click', enableNotifications);
+    }
     if (key === 'habits') {
       const s = safesettings(); const v = s.habits; root.querySelector('#prefTimeFormat').value = s.timeFormat || '12h'; root.querySelector('#prefTimeFormat').addEventListener('change', e => { s.timeFormat = e.target.value === '24h' ? '24h' : '12h'; save(); render(); }); root.querySelector('#prefDefaultView').value = v.defaultView; root.querySelector('#prefWeekStart').value = v.weekStarts;
       root.querySelector('#prefDefaultView').addEventListener('change', e => { v.defaultView = e.target.value; save(); }); root.querySelector('#prefWeekStart').addEventListener('change', e => { v.weekStarts = e.target.value; save(); });
@@ -2760,7 +2947,7 @@ function goalForm(id) {
     <div class="field"><label>Choose an emoji</label><input class="emoji-input" name="emoji" value="${esc(g?.emoji || '')}" placeholder="Tap here and choose an emoji" inputmode="text" autocomplete="off"><small>Use your phone's emoji keyboard to choose any emoji.</small></div>
     <div class="field"><label>Goal type</label><div class="goal-type">${[['target','Target'],['milestone','Milestone'],['habit','Habit Based']].map(([v,t]) => `<button type="button" class="${selectedType === v ? 'selected' : ''}" data-goal-type="${v}">${t}</button>`).join('')}</div></div>
     <div class="form-grid two"><div class="field"><label id="goalTargetLabel">Target <span>*</span></label><input name="target" type="number" min="1" required value="${esc(g?.target ?? '')}" placeholder="e.g. 90, 100000, 8"></div><div class="field"><label>Unit</label><input name="unit" value="${esc(g?.unit || '')}" placeholder="%, ₹, kg, books, days"></div></div>
-    <div class="form-grid two"><div class="field"><label>Target date *</label><input name="date" type="date" required value="${esc(g?.date || '')}"></div><div class="field"><label>Reminder time</label><div class="time-input"><input name="reminder" type="time" step="1" value="${esc(parseTime24(g?.reminder) || '')}">${icon('bell')}</div></div></div>
+    <div class="form-grid two"><div class="field"><label>Target date *</label><input name="date" type="date" required value="${esc(g?.date || '')}"></div><div class="field"><label>Notification time</label><div class="time-input"><input name="reminder" type="time" step="1" value="${esc(parseTime24(g?.reminder) || '')}">${icon('bell')}</div></div></div>
     ${id ? `<label class="switch-row"><span><b>Pause goal</b><small>Pause without losing progress.</small></span><input type="checkbox" name="paused" ${g?.status === 'paused' ? 'checked' : ''}><i></i></label>` : ''}
     <div class="form-actions"><button type="button" class="secondary-btn" data-modal-close>Cancel</button><button class="primary-btn">${id ? 'Save Changes' : 'Add Goal'} →</button></div>
   </form>`);
@@ -2797,9 +2984,11 @@ function eventForm(idOrDate) {
   const existing = editing ? state.events.find(e => e.id === idOrDate) : null;
   const defaultDate = editing ? existing.date : (idOrDate || calendarSelectedDate || todayISO());
   const linkedReminder = existing ? state.reminders.find(r => r.eventId === existing.id && r.source === 'manual') : null;
-  const defaultReminderTime = linkedReminder ? parseTime24(linkedReminder.time) : (parseTime24(existing?.time) || '12:00:00');
-  const defaultOffset = Number(linkedReminder?.offsetMinutes || 0);
-  modal(editing ? 'Edit event' : 'Add event', editing ? 'Update the event and its reminder settings.' : 'Schedule an event and optionally add a reminder.', `<form class="form" id="eventForm">
+  const defaultReminderTime = linkedReminder
+    ? eventReminderTimeValue(existing?.date, existing?.time, linkedReminder.offsetMinutes)
+    : eventReminderTimeValue(existing?.date || defaultDate, existing?.time || '12:00:00', 0);
+  const defaultOffset = linkedReminder ? Number(linkedReminder.offsetMinutes || 0) : Number(state.settings?.notifications?.defaultEventOffset ?? 0);
+  modal(editing ? 'Edit event' : 'Add event', editing ? 'Update the event and its reminder settings.' : 'Schedule an event and optionally notify you at the event time or before it.', `<form class="form" id="eventForm">
     <div class="form-grid two">
       <div class="field"><label>Event title *</label><input name="title" required value="${esc(existing?.title || '')}" placeholder="e.g. Team Meeting"></div>
       <div class="field"><label>Emoji</label><input name="emoji" class="emoji-input" value="${esc(existing?.emoji || '📅')}" placeholder="Choose an emoji" inputmode="text"></div>
@@ -2808,10 +2997,10 @@ function eventForm(idOrDate) {
       <div class="field"><label>Date *</label><input name="date" type="date" required value="${esc(defaultDate)}"></div>
       <div class="field"><label>Time *</label><input name="time" type="time" step="1" required value="${esc(parseTime24(existing?.time) || '12:00:00')}"></div>
     </div>
-    <label class="switch-row"><span><b>Reminder</b><small>Get notified before this event.</small></span><input type="checkbox" name="hasReminder" ${linkedReminder ? 'checked' : ''}><i></i></label>
+    <label class="switch-row"><span><b>Reminder</b><small>Get notified before this event.</small></span><input type="checkbox" name="hasReminder" ${editing ? (linkedReminder ? 'checked' : '') : 'checked'}><i></i></label>
     <div class="form-grid two event-reminder-fields">
-      <div class="field"><label>Reminder time</label><input name="reminderTime" type="time" step="1" value="${esc(parseTime24(defaultReminderTime) || '12:00:00')}"></div>
-      <div class="field"><label>Remind me</label><select name="offsetMinutes">
+      <div class="field"><label>Reminder time</label><input name="reminderTime" type="time" step="1" value="${esc(parseTime24(defaultReminderTime) || '12:00:00')}" readonly aria-readonly="true" title="Calculated from the event time and reminder offset"></div>
+      <div class="field"><label>Notify me</label><select name="offsetMinutes">
         ${[[0,'At event time'],[5,'5 minutes before'],[10,'10 minutes before'],[15,'15 minutes before'],[30,'30 minutes before'],[60,'1 hour before'],[1440,'1 day before']].map(([v,t]) => `<option value="${v}" ${v===defaultOffset?'selected':''}>${t}</option>`).join('')}
       </select></div>
     </div>
@@ -2820,8 +3009,21 @@ function eventForm(idOrDate) {
   </form>`);
   const form = document.getElementById('eventForm'); if (!form) return;
   const hasReminder = form.querySelector('[name="hasReminder"]'), reminderFields = () => form.querySelectorAll('.event-reminder-fields');
+  const reminderTimeInput = form.querySelector('[name="reminderTime"]');
   const syncReminderFields = () => reminderFields().forEach(x => x.style.display = hasReminder?.checked ? '' : 'none');
-  hasReminder?.addEventListener('change', syncReminderFields); syncReminderFields();
+  const syncCalculatedReminderTime = () => {
+    if (!reminderTimeInput) return;
+    const date = String(form.querySelector('[name="date"]')?.value || '');
+    const time = String(form.querySelector('[name="time"]')?.value || '');
+    const offset = Number(form.querySelector('[name="offsetMinutes"]')?.value || 0);
+    reminderTimeInput.value = eventReminderTimeValue(date, time, offset).slice(0, 8);
+  };
+  hasReminder?.addEventListener('change', syncReminderFields);
+  form.querySelector('[name="date"]')?.addEventListener('change', syncCalculatedReminderTime);
+  form.querySelector('[name="time"]')?.addEventListener('change', syncCalculatedReminderTime);
+  form.querySelector('[name="offsetMinutes"]')?.addEventListener('change', syncCalculatedReminderTime);
+  syncReminderFields();
+  syncCalculatedReminderTime();
   form.querySelector('#previewEventSound')?.addEventListener('click', () => playReminderSound(String(form.querySelector('[name="sound"]')?.value || 'gentle')));
   form.addEventListener('submit', e => {
     e.preventDefault();
@@ -2833,8 +3035,11 @@ function eventForm(idOrDate) {
     if (event) Object.assign(event, { title, emoji:String(fd.get('emoji') || '📅').trim() || '📅', date, time, updatedAt:now });
     else { event = { id:uid('e'), title, emoji:String(fd.get('emoji') || '📅').trim() || '📅', date, time, updatedAt:now }; state.events.push(event); }
     const wantsReminder = fd.get('hasReminder') === 'on';
-    const reminderTime = parseTime24(fd.get('reminderTime')) || time;
     const offsetMinutes = Number(fd.get('offsetMinutes') || 0);
+    // Event reminder time is derived from the event time + offset. Keeping the
+    // stored time aligned with that calculation avoids misleading reminder
+    // times when an event is edited. The scheduler remains date-aware.
+    const reminderTime = eventReminderTimeValue(date, time, offsetMinutes) || time;
     const sound = String(fd.get('sound') || 'gentle');
     const old = state.reminders.find(r => r.eventId === event.id && r.source === 'manual');
     if (wantsReminder) {
@@ -2847,7 +3052,7 @@ function eventForm(idOrDate) {
       state.syncMeta.deleted.reminders = state.syncMeta.deleted.reminders || {};
       state.syncMeta.deleted.reminders[old.id] = now;
     }
-    save(); closeModal(); render(); toast(editing ? 'Event updated' : 'Event added');
+    save(); closeModal(); render(); checkReminderNotifications(true); refreshReminderUi(); toast(editing ? 'Event updated' : 'Event added');
   });
   form.querySelector('#deleteEvent')?.addEventListener('click', () => {
     const now = new Date().toISOString();
@@ -2860,7 +3065,7 @@ function eventForm(idOrDate) {
     state.syncMeta.deleted.events[existing.id] = now;
     state.syncMeta.deleted.reminders = state.syncMeta.deleted.reminders || {};
     linked.forEach(r => state.syncMeta.deleted.reminders[r.id] = now);
-    save(); closeModal(); render(); toast('Event deleted');
+    save(); closeModal(); render(); refreshReminderUi(); toast('Event deleted');
   });
 }
 
@@ -2930,7 +3135,9 @@ function bindCommon() {
       toast('Could not sign out. Please try again.');
       return;
     }
-    location.hash = '/login';
+    clearAuthenticatedState();
+    if (typeof window.habitlyShowLogin === 'function') window.habitlyShowLogin();
+    else location.hash = '/login';
   })); document.querySelectorAll('[data-open-account]').forEach(b => b.addEventListener('click', () => { navigate('settings'); closeDrawer(); }));
   const t = document.getElementById('menuToggle'); if (t) t.addEventListener('click', openDrawer);
   document.querySelectorAll('[data-close-drawer]').forEach(b => b.addEventListener('click', closeDrawer));
@@ -2959,23 +3166,7 @@ function bindCommon() {
     }
   }));
   document.querySelectorAll('[data-reminders]').forEach(b => b.addEventListener('click', e => { e.stopPropagation(); document.getElementById('reminderPopover')?.classList.toggle('hidden'); }));
-  document.querySelectorAll('[data-add-reminder]')
-    .forEach(b =>
-      b.addEventListener(
-        'click',
-        () => reminderForm()
-      )
-    );
-
-  document.querySelectorAll('[data-edit-reminder]')
-    .forEach(b =>
-      b.addEventListener(
-        'click',
-        () => reminderForm(
-          b.dataset.editReminder
-        )
-      )
-    );
+  bindReminderControls(document);
   document.querySelectorAll('[data-close-reminders]').forEach(b => b.addEventListener('click', () => document.getElementById('reminderPopover')?.classList.add('hidden')));
   document.addEventListener('keydown', keyHandler, { once: true });
   document.querySelectorAll('[data-open-habit]').forEach(b => b.addEventListener('click', () => habitForm()));
@@ -3146,7 +3337,15 @@ if (typeof window !== 'undefined') {
     updateCloudDocument: (revision, next) => updateCloudDocument(revision, next),
     flushCloudSync: () => flushCloudSync(),
     reconcileCloudDocument: () => reconcileCloudDocument(),
-    cloudStatusText: () => cloudStatusText()
+    cloudStatusText: () => cloudStatusText(),
+    eventNotificationCount: () => eventNotificationCount(),
+    normalizeReminderDays: days => normalizeReminderDays(days),
+    nextReminderOccurrence: (r, from) => nextReminderOccurrence(r, from),
+    reminderDaysLabel: days => reminderDaysLabel(days),
+    reminderOverviewMarkup: date => reminderOverviewMarkup(date || calendarSelectedDate),
+    refreshReminderBadge: () => refreshReminderBadge(),
+    deleteReminderById: id => deleteReminderById(id),
+    showReminderNotification: reminder => showReminderNotification(reminder),
   };
 }
 

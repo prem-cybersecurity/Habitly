@@ -7,6 +7,7 @@ const authGateSource = fs.readFileSync('auth-gate.js', 'utf8');
 const authSource = fs.readFileSync('auth/app.js', 'utf8');
 const swSource = fs.readFileSync('service-worker.js', 'utf8');
 const schemaSource = fs.readFileSync('supabase-schema.sql', 'utf8');
+const stylesSource = fs.readFileSync('styles.css', 'utf8');
 
 const element = () => ({
   innerHTML: '', classList: { add(){}, remove(){}, toggle(){}, contains(){ return false; } },
@@ -124,6 +125,10 @@ assert.strictEqual(editMerged[0].target, 1, 'a local habit target edit must not 
 
 assert(authGateSource.includes("event === 'SIGNED_IN' || event === 'INITIAL_SESSION'"));
 assert(authGateSource.includes("event === 'SIGNED_OUT' || event === 'INITIAL_SESSION'"));
+assert(authGateSource.includes('window.habitlyShowLogin = goLogin'), 'logout must have a race-proof parent gate transition');
+assert(appSource.includes('clearAuthenticatedState();') && appSource.includes('window.habitlyShowLogin'), 'main app logout must explicitly clear the session UI and reopen login');
+assert(appSource.includes('refreshReminderBadge();'), 'save flow must refresh the reminder badge immediately');
+assert(appSource.includes('showNotification(title, options)'), 'background reminder notifications should use the service worker when possible');
 assert(!authGateSource.includes("event === 'TOKEN_REFRESHED') goDashboard"), 'token refresh must not navigate');
 assert((appSource.match(/auth\.onAuthStateChange\(/g) || []).length === 0, 'main app must not register a second Supabase auth listener');
 assert((authSource.match(/auth\.onAuthStateChange\(/g) || []).length === 0, 'auth iframe must not register a duplicate Supabase auth listener');
@@ -131,7 +136,7 @@ assert(authSource.includes('googleOAuthInFlight'), 'Google OAuth must have an in
 assert(appSource.includes("await requestDriveToken('consent')"), 'Drive onboarding must use the deduplicated token request path');
 assert(appSource.includes("requestDriveToken('', { silent: true })"), 'automatic Drive authorization must use silent token acquisition');
 assert(appSource.includes('login_hint'), 'Drive authorization must provide the remembered Google account as a login hint');
-assert(appSource.includes("const APP_VERSION = '3.0.0'"), 'application version must match the stabilization build');
+assert(appSource.includes("const APP_VERSION = '3.6.0'"), 'application version must remain centralized');
 assert(appSource.includes('Version ${APP_VERSION}'), 'visible About version must use the central application version');
 assert(appSource.includes('<span>Last synced</span>'), 'Settings must show the last synchronization time');
 assert(appSource.includes('if (driveLoginSyncBusy || googleDriveBusy) { driveUploadQueued = true; return; }'), 'busy Drive uploads must queue a newer state');
@@ -160,7 +165,7 @@ assert(appSource.includes('adoptRemoteWithPending'), 'login sync must preserve p
 assert(appSource.includes('Accelerate long-press input for large targets'), 'quantity controls must support accelerated long press');
 assert(appSource.includes('the click handler consumes it instead of adding another unit'), 'long press must not add an extra unit on pointerup/click');
 assert(swSource.includes("fetch(request, { cache: 'no-store' })"), 'app code must use network-first fetching');
-assert(swSource.includes('habitly-v30-shell-20260902'), 'service-worker cache version must be bumped for this stabilization build');
+assert(swSource.includes('habitly-v361-shell-20260903'), 'service-worker cache version must be current');
 assert(appSource.includes('Metadata validation is deliberately one request on the normal path'), 'fast Drive sync path must be documented in code');
 assert(appSource.includes('Metadata validation is deliberately one request on the normal path'), 'normal Drive sync should use cached IDs rather than repeated folder/file discovery');
 assert(!appSource.includes('drive-restoring-screen'), 'login-time Drive restore must not replace the whole application with a blocking restore screen');
@@ -175,6 +180,47 @@ assert(sandbox.reminderIsDue({id:'r1', time:'10:00', enabled:true}, new Date('20
 assert(sandbox.reminderIsDue({id:'r1', time:'10:00', enabled:true}, new Date('2026-08-31T10:06:00')) === false, 'reminder grace window must not fire hours or long after the scheduled minute');
 assert(sandbox.nextReminderOccurrence({id:'r1', time:'10:00', enabled:true}, new Date('2026-08-31T10:01:00')).getDate() === 1, 'next daily reminder should roll to the next day after the scheduled time');
 
+
+
+// Reminder overview regression coverage: event reminder actions must target the event,
+// while delete buttons must delete the reminder only. The event itself is deleted from
+// the selected-day event controls/editor, not from the reminder row.
+sandbox.window.__habitlyTestHooks.setState({
+  habits:[{id:'h-rem',name:'Water',emoji:'🥤',target:8,current:0,daily:{},paused:false}],
+  goals:[],
+  events:[{id:'e-rem',title:'Meeting',emoji:'📅',date:'2099-01-02',time:'18:00:00'}],
+  reminders:[{id:'r-rem',eventId:'e-rem',source:'manual',enabled:true,time:'17:45:00',offsetMinutes:15,sound:'gentle'}],
+  activityHistory:{}, profile:{}, settings:{notifications:{habitReminders:true,eventReminders:true,defaultEventOffset:15,defaultHabitTime:'20:00:00',defaultHabitDays:[0,1,2,3,4,5,6]}}
+});
+const overview = sandbox.reminderOverviewMarkup('2099-01-02');
+assert(overview.includes('data-delete-reminder="r-rem"'), 'event reminder overview must expose a reminder-delete action');
+assert(!overview.includes('data-delete-event="e-rem"'), 'reminder overview must not expose a second ambiguous event-delete trash icon');
+assert(overview.includes('data-edit-event-reminder="e-rem"'), 'event reminder edit must pass the event ID to eventForm');
+// Reminder Overview is an upcoming-reminder surface, not an event list.
+sandbox.window.__habitlyTestHooks.setState({
+  habits:[{id:'h-rem',name:'Water',emoji:'🥤',target:8,current:0,daily:{},paused:false},{id:'h-off',name:'Old',emoji:'🧪',target:1,current:0,daily:{},paused:false}],
+  goals:[],
+  events:[{id:'e-rem',title:'Meeting',emoji:'📅',date:'2099-01-02',time:'18:00:00'},{id:'e-no-rem',title:'Plain event',date:'2099-01-02',time:'19:00:00'}],
+  reminders:[
+    {id:'r-rem',eventId:'e-rem',source:'manual',enabled:true,time:'17:45:00',offsetMinutes:15,sound:'gentle'},
+    {id:'r-off',habitId:'h-off',source:'manual',enabled:false,time:'18:30:00',days:[0,1,2,3,4,5,6],sound:'gentle'}
+  ],
+  activityHistory:{}, profile:{}, settings:{notifications:{habitReminders:true,eventReminders:true,defaultEventOffset:0,defaultHabitTime:'20:00:00',defaultHabitDays:[0,1,2,3,4,5,6]}}
+});
+const upcomingOnly = sandbox.reminderOverviewMarkup('2099-01-02');
+assert(upcomingOnly.includes('data-delete-reminder="r-rem"'), 'upcoming event reminder must remain deletable');
+assert(!upcomingOnly.includes('r-off'), 'disabled old reminder must not appear in Upcoming Reminder Overview');
+assert(!upcomingOnly.includes('Plain event'), 'calendar events without reminders must not appear in Reminder Overview');
+
+// Bell badge regression: every upcoming event counts once, regardless of whether
+// it has a reminder or which "remind me before" offset it uses. Habit reminders
+// are counted separately, while disabled habit reminders are excluded.
+assert.strictEqual(sandbox.eventNotificationCount(), 2, 'bell badge must count both the reminded event and the plain event');
+const atEvent = {id:'r-at',eventId:'e-rem',source:'manual',enabled:true,offsetMinutes:0,sound:'gentle'};
+assert.strictEqual(sandbox.nextEventReminderOccurrence(atEvent, new Date('2099-01-02T17:00:00')).getTime(), new Date('2099-01-02T18:00:00').getTime(), 'event reminder at event time must be valid without a before offset');
+
+assert(!appSource.includes('HabitlyReminders'), 'web build must not depend on the removed native Android reminder plugin');
+assert(!appSource.includes('nativeReminderPlugin'), 'web build must not contain native Android reminder bridge code');
 
 // Deterministic mutation-journal coverage for the core user actions.
 sandbox.loadStateForUser({ id:'mutation-user', email:'mutation@example.com', user_metadata:{} });
@@ -311,6 +357,36 @@ const eventReminder = sandbox.normalizeState({
 sandbox.window.__habitlyTestHooks.setState(eventReminder);
 assert.strictEqual(sandbox.nextReminderOccurrence(eventReminder.reminders[0], new Date('2026-08-31T17:30:00')).toISOString(), '2026-08-31T17:45:00.000Z', 'event reminder must calculate the actual offset occurrence');
 assert.strictEqual(sandbox.nextReminderOccurrence(eventReminder.reminders[0], new Date('2026-08-31T18:00:00')), null, 'passed event reminder must no longer be upcoming');
+assert.strictEqual(sandbox.eventReminderTimeValue('2026-08-31', '18:00:00', 15), '17:45:00', 'event reminder editor must calculate the actual reminder time from the offset');
+
+// The bell badge must count active upcoming habit + event reminders immediately.
+const badgeNow = new Date();
+const badgeTomorrow = new Date(badgeNow.getFullYear(), badgeNow.getMonth(), badgeNow.getDate() + 1, 12);
+const badgeTomorrowISO = sandbox.dateISO(badgeTomorrow);
+const badgeState = sandbox.normalizeState({
+  habits:[{id:'badge-habit',name:'Walk',target:1,current:0,paused:false}],
+  goals:[],
+  events:[{id:'badge-event',title:'Meeting',date:badgeTomorrowISO,time:'18:00:00'}],
+  reminders:[
+    {id:'badge-habit-reminder',habitId:'badge-habit',time:'23:59:00',enabled:true,source:'manual'},
+    {id:'badge-event-reminder',eventId:'badge-event',time:'17:45:00',offsetMinutes:15,enabled:true,source:'manual'}
+  ],
+  profile:{},settings:{},activityHistory:{},syncMeta:{}
+});
+sandbox.window.__habitlyTestHooks.setState(badgeState);
+assert.strictEqual(sandbox.eventNotificationCount(), 2, 'bell badge must count both active upcoming habit and event reminders');
+const eventMarkup = sandbox.window.__habitlyTestHooks.reminderOverviewMarkup(badgeTomorrowISO);
+assert(eventMarkup.includes('data-toggle-reminder=\"badge-event-reminder\"'), 'event reminder row must expose its own independent toggle');
+assert(eventMarkup.includes('Reminder '), 'event reminder row must display its reminder state');
+
+const badgePrefs = sandbox.window.__habitlyTestHooks.getState();
+badgePrefs.settings.notifications.habitReminders = false;
+sandbox.window.__habitlyTestHooks.setState(badgePrefs);
+assert.strictEqual(sandbox.eventNotificationCount(), 1, 'turning off habit reminders must not disable or hide event reminders');
+badgePrefs.settings.notifications.eventReminders = false;
+sandbox.window.__habitlyTestHooks.setState(badgePrefs);
+assert.strictEqual(sandbox.eventNotificationCount(), 1, 'turning off event reminders must not hide the upcoming event from the combined badge');
+
 
 const formatState = sandbox.window.__habitlyTestHooks.getState();
 formatState.settings.timeFormat = '24h';
@@ -370,6 +446,14 @@ assert(appSource.includes('subscribeCloudRealtime'), 'cloud sync must use Realti
 assert(appSource.includes("mode === 'cloud'"), 'cloud storage mode must be explicit');
 assert(appSource.includes('Google Drive is backup/restore only'), 'Google Drive must remain backup-only');
 assert(appSource.includes('startCloudPolling'), 'cloud sync must have a polling fallback');
+assert(appSource.includes('habitReminders'), 'habit reminders must have an independent notification preference');
+assert(appSource.includes('eventReminders'), 'event reminders must have an independent notification preference');
+assert(appSource.includes('data-toggle-reminder'), 'event reminder overview must expose an independent enable/disable control');
+assert(appSource.includes('driveDisconnect'), 'Google Drive settings must provide a disconnect control');
+assert(appSource.includes('disconnectDrive'), 'Google Drive disconnect flow must be implemented');
+assert(stylesSource.includes('.drive-auto input:checked+.toggle'), 'automatic Drive backup toggle must render its checked visual state');
+assert(appSource.includes("Automatic Google Drive backup disabled"), 'Drive automatic backup toggle must provide an explicit disabled state');
+assert(appSource.includes('reminder.enabled === false'), 'disabled reminders must be excluded from upcoming reminder surfaces');
 assert(appSource.includes('eventId'), 'reminders must support events');
 assert(appSource.includes('function eventForm(idOrDate)'), 'events must have an editable form');
 assert(appSource.includes("editing ? 'Edit event' : 'Add event'"), 'event form must support editing');
@@ -382,3 +466,50 @@ assert(appSource.includes("second: '2-digit'"), 'date/time displays must include
 assert(appSource.includes("hour12: userTimeFormat() !== '24h'"), 'backup timestamps must follow the user time-format preference');
 assert(appSource.includes('step=\"1\"'), 'time inputs must support seconds');
 console.log('PASS: final sync/reminder/pause hardening assertions');
+
+
+// Reminder behavior: habit days are independent and event reminders count as
+// upcoming notifications only when their actual reminder occurrence is future.
+const dayReminder = { id:'r-days', habitId:'h-days', time:'20:00:00', days:[1,3,5], enabled:true, source:'manual' };
+const dayMonday = sandbox.nextReminderOccurrence(dayReminder, new Date('2026-08-31T21:00:00'));
+assert.strictEqual(dayMonday.toISOString().slice(0,10), '2026-09-02', 'a Monday evening reminder must skip to the next selected Wednesday when Monday time has already passed in local test context');
+const daySunday = sandbox.nextReminderOccurrence(dayReminder, new Date('2026-08-30T19:00:00'));
+assert.strictEqual(daySunday.toISOString().slice(0,10), '2026-08-31', 'selected reminder days must determine the next actual occurrence');
+assert.strictEqual(sandbox.reminderDaysLabel([0,1,2,3,4,5,6]), 'Every day', 'all seven reminder days should display as Every day');
+assert(appSource.includes('defaultEventOffset: 0'), 'new events must have a configurable default reminder offset');
+assert(appSource.includes('name="days"'), 'habit reminders must support selected days');
+assert(appSource.includes('data-edit-event-reminder'), 'event reminders must have an edit action');
+assert(appSource.includes('data-delete-reminder'), 'reminder overview must expose a delete reminder action');
+assert(appSource.includes('function deleteReminderById(id)'), 'reminder deletion must use one synchronized deletion path');
+sandbox.window.__habitlyTestHooks.setState({
+  habits:[{id:'h-days',name:'Read',target:1,current:0,daily:{},paused:false}],
+  goals:[],
+  events:[{id:'e-upcoming',title:'Meeting',date:'2026-09-03',time:'23:00:00',updatedAt:'2026-09-01T10:00:00Z'}],
+  reminders:[
+    {id:'r-habit-count',habitId:'h-days',time:'23:30:00',days:[0,1,2,3,4,5,6],enabled:true,source:'manual'},
+    {id:'r-event-count',eventId:'e-upcoming',time:'22:45:00',offsetMinutes:15,enabled:true,source:'manual'}
+  ],
+  profile:{},activityHistory:{},settings:{notifications:{habitReminders:true,eventReminders:true}}
+});
+assert.strictEqual(sandbox.eventNotificationCount(), 2, 'bell count must include both upcoming habit and event reminders');
+let reminderTestState = sandbox.window.__habitlyTestHooks.getState(); reminderTestState.settings.notifications.habitReminders = false; sandbox.window.__habitlyTestHooks.setState(reminderTestState);
+assert.strictEqual(sandbox.eventNotificationCount(), 1, 'turning off habit reminders must not remove upcoming event reminders from the bell count');
+reminderTestState = sandbox.window.__habitlyTestHooks.getState(); reminderTestState.settings.notifications.eventReminders = false; sandbox.window.__habitlyTestHooks.setState(reminderTestState);
+assert.strictEqual(sandbox.eventNotificationCount(), 1, 'turning off event reminders must not hide the upcoming event from the combined bell count');
+
+// Verify deletion from the Calendar Reminder Overview also updates the bell immediately.
+sandbox.window.__habitlyTestHooks.setState({
+  habits:[{id:'h-delete-overview',name:'Read',target:1,current:0,daily:{},paused:false}],
+  goals:[],
+  events:[{id:'e-delete-overview',title:'Meeting',date:'2026-09-03',time:'23:00:00',updatedAt:'2026-09-01T10:00:00Z'}],
+  reminders:[
+    {id:'r-habit-overview',habitId:'h-delete-overview',time:'23:30:00',days:[0,1,2,3,4,5,6],enabled:true,source:'manual'},
+    {id:'r-event-overview',eventId:'e-delete-overview',time:'22:45:00',offsetMinutes:15,enabled:true,source:'manual'}
+  ],
+  profile:{},activityHistory:{},settings:{notifications:{habitReminders:true,eventReminders:true}}
+});
+const overviewMarkup = sandbox.window.__habitlyTestHooks.reminderOverviewMarkup('2026-09-03');
+assert(overviewMarkup.includes('data-delete-reminder="r-event-overview"'), 'reminder overview must expose event reminder deletion');
+assert.strictEqual(sandbox.window.__habitlyTestHooks.deleteReminderById('r-event-overview'), true, 'event reminder deletion must remove the reminder');
+assert(!sandbox.window.__habitlyTestHooks.getState().reminders.some(r => r.id === 'r-event-overview'), 'deleted event reminder must disappear from local state');
+assert.strictEqual(sandbox.eventNotificationCount(), 2, 'deleting an event reminder must not remove the event from the combined bell count');
