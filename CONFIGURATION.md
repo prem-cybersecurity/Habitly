@@ -39,10 +39,3 @@ on conflict (user_id) do update set role = excluded.role;
 Do not expose or add a Supabase service-role key to the browser.
 
 Visitor records are created automatically when a user successfully authenticates through Habitly. The Admin page reads those records through the `admins may read visitors` RLS policy.
-
-
-## Cross-device architecture
-Habitly uses Supabase as the only active cross-device source of truth. Browser localStorage is only a performance/offline cache. Google Drive is not required for cross-device synchronization.
-
-### Required Supabase setup
-Run `supabase-schema.sql` in the Supabase SQL Editor, including the `habitly_sync_documents_v2` table, its RLS policy, `commit_habitly_sync_v2()` RPC, and Realtime publication entry.

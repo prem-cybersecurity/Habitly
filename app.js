@@ -2,7 +2,7 @@
    Dashboard / Habits / Goals / Calendar / Statistics
 */
 const AS = 'assets/';
-const APP_VERSION = '3.9.3';
+const APP_VERSION = '3.9.4';
 const ROUTES = ['dashboard', 'habits', 'goals', 'calendar', 'statistics', 'settings'];
 const STORAGE = 'habitly.final.v2';
 const USER_STORAGE_PREFIX = 'habitly.final.v3.user.';
@@ -64,8 +64,6 @@ let cloudSyncLastAt = 0;
 let cloudSyncError = '';
 let cloudChannel = null;
 let cloudRealtimeReady = false;
-let cloudRealtimeDeferredRevision = 0;
-let cloudHydrationInProgress = false;
 let cloudLastSafetyPollAt = 0;
 let cloudHydrationGeneration = 0;
 let cloudHydrationConfirmedUserId = '';
@@ -861,42 +859,33 @@ async function reconcileCloudDocument() {
   // flight; never apply the older read result over that newer local state.
   const reconcileGeneration = syncGeneration;
   const reconcileUserId = currentAuthUser.id;
-  let remote = await fetchCloudDocument();
+  const remote = await fetchCloudDocument();
   if (reconcileUserId !== currentAuthUser?.id || reconcileGeneration !== syncGeneration) {
     cloudSyncPending = pendingMutations(state).length > 0;
     if (cloudSyncPending) scheduleCloudSync();
     return false;
   }
   if (!remote) {
-    // No row exists yet. This is the only point where a browser is allowed to
-    // establish the account's cloud baseline. If another device creates the
-    // row at the same time, the create will conflict; immediately refetch and
-    // hydrate from that winning cloud copy instead of leaving this device
-    // with an empty/local-only state.
+    // This is a fresh cloud namespace. Drive is intentionally ignored here:
+    // an old/deleted Drive backup must never become the source of active data.
+    // The first authenticated device establishes the clean cloud baseline.
     const createGeneration = syncGeneration;
-    try {
-      const created = await createCloudDocument(state);
-      cloudRevision = Number(created.revision) || 1;
-      cloudSyncAvailable = true;
-      cloudSyncLastAt = Date.now();
-      state.syncMeta = state.syncMeta || clone(defaultState.syncMeta);
-      state.syncMeta.cloudRevision = cloudRevision;
-      if (createGeneration === syncGeneration) {
-        resetSyncTracking(state);
-        if (currentStorageKey) localStorage.setItem(currentStorageKey, JSON.stringify(state));
-      } else {
-        cloudSyncPending = pendingMutations(state).length > 0;
-        if (cloudSyncPending) scheduleCloudSync();
-      }
-      return false;
-    } catch (e) {
-      if (e?.code !== 'CLOUD_CONFLICT' && !/duplicate|unique|already exists|created by another device/i.test(String(e?.message || ''))) throw e;
-      // Another authenticated device won the first-write race. Refetch before
-      // doing anything else; never treat the local fresh state as authoritative.
-      const winner = await fetchCloudDocument();
-      if (!winner) throw e;
-      remote = winner;
+    const created = await createCloudDocument(state);
+    cloudRevision = Number(created.revision) || 1;
+    cloudSyncAvailable = true;
+    cloudSyncLastAt = Date.now();
+    state.syncMeta = state.syncMeta || clone(defaultState.syncMeta);
+    state.syncMeta.cloudRevision = cloudRevision;
+    if (createGeneration === syncGeneration) {
+      resetSyncTracking(state);
+      if (currentStorageKey) localStorage.setItem(currentStorageKey, JSON.stringify(state));
+    } else {
+      // A user action occurred while the initial cloud write was in flight.
+      // Never clear that newer mutation; let the normal CAS flush publish it.
+      cloudSyncPending = pendingMutations(state).length > 0;
+      if (cloudSyncPending) scheduleCloudSync();
     }
+    return false;
   }
   const remoteState = validateCloudDocument(remote);
   const before = createSyncSnapshot(state);
@@ -918,13 +907,7 @@ async function reconcileCloudDocument() {
     return true;
   }
   const avatar = state.profile?.avatar || '';
-  // Cloud is authoritative after a clean browser bootstrap. Never merge an
-  // arbitrary stale local cache back into the cloud just because it happens to
-  // exist in this browser. Only an explicit persisted mutation journal is
-  // allowed to modify the remote baseline during hydration.
-  const next = pending.length
-    ? adoptRemoteWithPending(remoteState, state, syncBaseState)
-    : normalizeState(clone(remoteState));
+  const next = pending.length ? adoptRemoteWithPending(remoteState, state, syncBaseState) : mergeCloudHydration(remoteState, state);
   if (avatar && !next.profile.avatar) next.profile.avatar = avatar;
   next.settings.storage = { ...(next.settings.storage || {}), mode: 'cloud', setupCompleted:true };
   state = normalizeState(next);
@@ -953,11 +936,7 @@ async function reconcileCloudDocument() {
   return JSON.stringify(before) !== JSON.stringify(createSyncSnapshot(state));
 }
 async function flushCloudSync() {
-  // Hydration must finish before any queued local write can create/overwrite
-  // the cloud document. This is critical after browser storage/cache is
-  // cleared: an empty fresh state must first download the account's cloud copy.
   if (!cloudStorageSelected() || !currentAuthUser?.id || !navigator.onLine) return false;
-  if (cloudHydrationInProgress || cloudHydrationConfirmedUserId !== currentAuthUser.id) return false;
   if (cloudSyncBusy) { cloudSyncQueued = true; return false; }
   if (!pendingMutations(state).length) { cloudSyncPending = false; return true; }
   cloudSyncBusy = true; cloudSyncPending = true;
@@ -987,10 +966,11 @@ async function flushCloudSync() {
       localSnapshot.syncMeta.mutations = effectiveMutations;
       localSnapshot.syncMeta.pending = dirtyFromMutationList(effectiveMutations);
       const merged = mergeForDriveUpload(remoteState, localSnapshot, dirtyFromMutationList(effectiveMutations), syncBaseState);
-      if (isSuspiciousEmptySync(localSnapshot, remoteState, mutationSnapshot)) {
-        // Remote may be empty because of corruption or a stale/partial write.
-        // Merge will preserve explicit local mutations; an unexplained empty
-        // local state is never allowed to erase a populated cloud document.
+      if (isSuspiciousEmptySync(localSnapshot, remoteState, mutationSnapshot) && Number(remote.revision) > 1) {
+        // Protect an already-established cloud document from an accidental
+        // empty overwrite. Revision 1 is allowed to accept the first local
+        // state when the cloud namespace was initialized empty; the pending
+        // mutation journal proves this device has real local changes to publish.
         throw new Error('Sync safety guard: refusing an unexplained empty cloud overwrite');
       }
       let write;
@@ -1051,13 +1031,11 @@ async function flushCloudSync() {
 function scheduleCloudSync() {
   if (!cloudStorageSelected() || !navigator.onLine) { cloudSyncPending = pendingMutations(state).length > 0; return; }
   clearTimeout(cloudSyncTimer);
-  cloudSyncTimer = setTimeout(() => flushCloudSync().catch(() => {}), 25);
+  cloudSyncTimer = setTimeout(() => flushCloudSync().catch(() => {}), 80);
 }
 async function initializeCloudSync() {
   if (!cloudStorageSelected()) return;
   cloudHydrationGeneration++;
-  cloudHydrationInProgress = true;
-  cloudHydrationConfirmedUserId = '';
   try {
     const changed = await reconcileCloudDocument();
     cloudHydrationConfirmedUserId = currentAuthUser?.id || '';
@@ -1066,22 +1044,11 @@ async function initializeCloudSync() {
       // connected Drive backup may safely resume after cloud confirmation.
       driveHydrationConfirmedUserId = currentAuthUser?.id || '';
     }
-    // If another device committed while the initial SELECT was in flight, the
-    // Realtime packet was deliberately deferred. One fast follow-up read closes
-    // that tiny bootstrap gap without adding a read to normal Realtime updates.
-    if (cloudRealtimeDeferredRevision > cloudRevision && currentAuthUser?.id) {
-      cloudRealtimeDeferredRevision = 0;
-      const refreshed = await reconcileCloudDocument();
-      if (refreshed) changed = true;
-    }
     if (changed && currentRoute() !== 'login') render();
     if (pendingMutations(state).length) scheduleCloudSync();
   } catch (e) {
-    cloudHydrationConfirmedUserId = '';
     cloudSyncError = e?.message || 'Cloud synchronization unavailable';
     console.warn('Habitly cloud hydration unavailable:', e);
-  } finally {
-    cloudHydrationInProgress = false;
   }
 }
 function subscribeCloudRealtime() {
@@ -1091,49 +1058,11 @@ function subscribeCloudRealtime() {
   cloudChannel = window.habitlySupabase.channel(`${CLOUD_CHANNEL}:${userId}`)
     .on('postgres_changes', { event:'*', schema:'public', table:CLOUD_TABLE, filter:`user_id=eq.${userId}` }, payload => {
       const row = payload?.new;
-      if (!row || row.user_id !== currentAuthUser?.id || row.updated_by === ensureCloudDeviceId() || Number(row.revision) <= cloudRevision) return;
-      // Do not let a Realtime packet race ahead of the initial authoritative
-      // bootstrap. Once hydration is confirmed, the payload can be applied
-      // directly with no extra SELECT round trip.
-      if (cloudHydrationInProgress || cloudHydrationConfirmedUserId !== currentAuthUser?.id) {
-        cloudRealtimeDeferredRevision = Math.max(cloudRealtimeDeferredRevision, Number(row.revision) || 0);
-        return;
-      }
-      // Realtime already contains the complete authoritative row. Apply it
-      // immediately instead of doing another network SELECT, which removes an
-      // unnecessary round trip from normal cross-device synchronization.
-      try {
-        const remoteState = validateCloudDocument(row);
-        const pending = pendingMutations(state);
-        const before = createSyncSnapshot(state);
-        const next = pending.length
-          ? adoptRemoteWithPending(remoteState, state, syncBaseState)
-          : normalizeState(clone(remoteState));
-        next.settings.storage = { ...(next.settings.storage || {}), mode:'cloud', setupCompleted:true };
-        state = normalizeState(next);
-        cloudRevision = Number(row.revision);
-        state.syncMeta.cloudRevision = cloudRevision;
-        cloudSyncAvailable = true;
-        cloudSyncLastAt = Date.now();
-        cloudSyncError = '';
-        if (pending.length) {
-          syncBaseState = createSyncSnapshot(remoteState);
-          syncLastSavedSnapshot = createSyncSnapshot(state);
-          syncDirty = dirtyFromMutations();
-        } else {
-          resetSyncTracking(state);
-        }
-        if (currentStorageKey) localStorage.setItem(currentStorageKey, JSON.stringify(state));
-        if (JSON.stringify(before) !== JSON.stringify(createSyncSnapshot(state)) && currentRoute() !== 'login') render();
+      if (!row || row.updated_by === ensureCloudDeviceId() || Number(row.revision) <= cloudRevision) return;
+      reconcileCloudDocument().then(changed => {
+        if (changed && currentRoute() !== 'login') render();
         if (pendingMutations(state).length) scheduleCloudSync();
-      } catch (e) {
-        // Fall back to a fresh authoritative read if the realtime payload is
-        // malformed or arrives during account switching.
-        reconcileCloudDocument().then(changed => {
-          if (changed && currentRoute() !== 'login') render();
-          if (pendingMutations(state).length) scheduleCloudSync();
-        }).catch(err => { cloudSyncError = err?.message || 'Realtime reconciliation failed'; });
-      }
+      }).catch(e => { cloudSyncError = e?.message || 'Realtime reconciliation failed'; });
     })
     .subscribe(status => {
       cloudRealtimeReady = status === 'SUBSCRIBED';
@@ -1153,7 +1082,7 @@ function stopCloudSync() {
   if (cloudChannel && window.habitlySupabase) { try { window.habitlySupabase.removeChannel(cloudChannel); } catch (_) {} }
   cloudChannel = null; cloudRealtimeReady = false; cloudLastSafetyPollAt = 0; cloudRevision = 0; cloudSyncBusy = false; cloudSyncQueued = false;
   cloudSyncPending = false; cloudSyncAvailable = false; cloudSyncLastAt = 0; cloudSyncError = '';
-  cloudHydrationConfirmedUserId = ''; cloudHydrationInProgress = false; cloudDeviceId = '';
+  cloudHydrationConfirmedUserId = ''; cloudDeviceId = '';
 }
 function startCloudPolling() {
   clearInterval(window.__habitlyCloudPoll);
@@ -3618,15 +3547,7 @@ async function handleAuthenticatedUser(nextUser) {
   if (driveHydrationConfirmedUserId && driveHydrationConfirmedUserId !== nextUser?.id) driveHydrationConfirmedUserId = '';
   state = loadStateForUser(nextUser);
   registerAuthenticatedVisitor(nextUser);
-  // IMPORTANT: do not reset the persisted mutation journal here. A browser can
-  // come back online after an offline edit, and those pending mutations must
-  // survive login/bootstrap so they can be rebased onto the cloud revision.
-  // Establish the local snapshot as the temporary baseline; cloud hydration
-  // below decides whether the cloud copy is authoritative or local mutations
-  // need to be replayed.
-  syncBaseState = createSyncSnapshot(state);
-  syncLastSavedSnapshot = createSyncSnapshot(state);
-  syncDirty = dirtyFromMutations();
+  resetSyncTracking(state);
   if (!state.profile.email) state.profile.email = nextUser.email || '';
   // Authenticated Habitly accounts always use Supabase as the authoritative
   // cross-device source. Legacy local/Drive metadata is migrated to cloud mode.
@@ -3634,12 +3555,9 @@ async function handleAuthenticatedUser(nextUser) {
   startReminderService();
   try { await persistStorageChoice('cloud'); } catch (_) {}
   appPhase = 'READY';
-  // Subscribe first so changes committed by another device during bootstrap are
-  // not missed. The Realtime handler is gated until cloud hydration confirms the
-  // initial baseline.
-  subscribeCloudRealtime();
   initializeCloudSync().finally(() => {
     if (currentAuthUser?.id !== nextUser.id) return;
+    subscribeCloudRealtime();
     startCloudPolling();
     if (location.hash !== '#/login') render();
   });
