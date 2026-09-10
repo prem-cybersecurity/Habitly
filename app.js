@@ -2,7 +2,7 @@
    Dashboard / Habits / Goals / Calendar / Statistics
 */
 const AS = 'assets/';
-const APP_VERSION = '3.9.4';
+const APP_VERSION = '3.9.6';
 const ROUTES = ['dashboard', 'habits', 'goals', 'calendar', 'statistics', 'settings'];
 const STORAGE = 'habitly.final.v2';
 const USER_STORAGE_PREFIX = 'habitly.final.v3.user.';
@@ -749,8 +749,8 @@ function cloudStatusText() {
   if (!cloudStorageSelected()) return 'Local only';
   if (!navigator.onLine) return 'Offline — changes saved locally';
   if (cloudSyncBusy) return 'Syncing…';
+  if (cloudSyncError) return `Sync failed — ${cloudSyncError}`;
   if (cloudSyncPending || pendingMutations(state).length) return 'Changes waiting to sync';
-  if (cloudSyncError) return 'Sync failed — retrying';
   if (cloudSyncLastAt) {
     const seconds = Math.max(0, Math.floor((Date.now() - cloudSyncLastAt) / 1000));
     return seconds < 10 ? 'Synced just now' : `Synced ${seconds} seconds ago`;
@@ -966,13 +966,14 @@ async function flushCloudSync() {
       localSnapshot.syncMeta.mutations = effectiveMutations;
       localSnapshot.syncMeta.pending = dirtyFromMutationList(effectiveMutations);
       const merged = mergeForDriveUpload(remoteState, localSnapshot, dirtyFromMutationList(effectiveMutations), syncBaseState);
-      if (isSuspiciousEmptySync(localSnapshot, remoteState, mutationSnapshot) && Number(remote.revision) > 1) {
-        // Protect an already-established cloud document from an accidental
-        // empty overwrite. Revision 1 is allowed to accept the first local
-        // state when the cloud namespace was initialized empty; the pending
-        // mutation journal proves this device has real local changes to publish.
-        throw new Error('Sync safety guard: refusing an unexplained empty cloud overwrite');
-      }
+      // Do not apply the empty-state safety guard to the authoritative
+      // Supabase commit path. At this point we have an explicit pending
+      // mutation journal produced by a real local user change, and the
+      // database CAS revision is the final overwrite protection. The old
+      // guard could deadlock a legitimate first sync when the cloud document
+      // existed but contained an empty state: it rejected the very upsert that
+      // was supposed to populate that document. Drive backup keeps its own
+      // empty-state protection because Drive is not the active sync authority.
       let write;
       try { write = await updateCloudDocument(Number(remote.revision), merged, effectiveMutations); }
       catch (e) {
