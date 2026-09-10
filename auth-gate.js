@@ -36,7 +36,7 @@
         source: 'habitly-gate',
         type: 'AUTH_ROUTE',
         route
-      }, '*');
+      }, window.location.origin);
       pendingRoute = null;
     } catch (_) {}
   }

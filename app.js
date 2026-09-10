@@ -2,7 +2,7 @@
    Dashboard / Habits / Goals / Calendar / Statistics
 */
 const AS = 'assets/';
-const APP_VERSION = '3.6.0';
+const APP_VERSION = '3.9.3';
 const ROUTES = ['dashboard', 'habits', 'goals', 'calendar', 'statistics', 'settings'];
 const STORAGE = 'habitly.final.v2';
 const USER_STORAGE_PREFIX = 'habitly.final.v3.user.';
@@ -93,9 +93,10 @@ const defaultState = {
   syncMeta: { deleted: { habits: {}, goals: {}, events: {}, reminders: {} }, recordVersions: { habits: {}, goals: {}, events: {}, reminders: {} }, pending: { habits: false, goals: false, events: false, reminders: false, profile: false, settings: false, activityHistory: false }, mutations: [] },
   settings: {
     timeFormat: '12h',
-    notifications: { daily: true, habitReminders: true, eventReminders: true, motivational: true, weekly: true, goal: true, defaultEventOffset: 0, defaultHabitTime: '20:00:00', defaultHabitDays: [0,1,2,3,4,5,6] },
+    notifications: { daily: true, habitReminders: true, eventReminders: true, motivational: true, weekly: true, goal: true, defaultHabitTime: '20:00:00', defaultHabitDays: [0,1,2,3,4,5,6] },
     habits: { defaultView: 'All Habits', weekStarts: 'Sunday', autoComplete: true, keepStreak: true, quickQuantity: true },
-    drive: { connected: false, email: '', folderId: '', fileId: '', lastBackupDate: '', lastBackupAt: '', lastRemoteUpdatedAt: '', remoteEverSynced: false, syncRevision: 0, autoDaily: true },
+    fitness: { workoutLogging: false, bodyMeasurements: false },
+    drive: { connected: false, email: '', folderId: '', fileId: '', lastBackupDate: '', lastBackupAt: '', lastRemoteUpdatedAt: '', remoteEverSynced: false, syncRevision: 0, autoDaily: false },
     storage: { mode: 'cloud', setupCompleted: true }
   }
 };
@@ -179,6 +180,7 @@ function mergeState(saved, options = {}) {
       timeFormat: saved.settings?.timeFormat === '24h' ? '24h' : '12h',
       notifications: normalizeNotificationSettings({ ...defaultState.settings.notifications, ...(saved.settings.notifications || {}) }),
       habits: { ...defaultState.settings.habits, ...(saved.settings.habits || {}) },
+      fitness: { ...defaultState.settings.fitness, ...(saved.settings.fitness || {}) },
       drive: { ...defaultState.settings.drive, ...(saved.settings.drive || {}) },
       storage: { ...defaultState.settings.storage, ...(saved.settings.storage || {}) }
     } : clone(defaultState.settings)
@@ -188,6 +190,113 @@ function mergeState(saved, options = {}) {
 }
 function buildSnapshot(s, date) { return { date, habits: (s.habits || []).map(h => { const current = Math.max(0, Number((h.daily || {})[date] ?? 0) || 0), target = Math.max(1, Number(h.target) || 1); return { id: h.id, name: h.name, emoji: h.emoji || '', category: h.category, paused: !!h.paused, target, unit: h.unit || '', current, percent: Math.min(100, Math.round(current / target * 100)) }; }) }; }
 function captureActivitySnapshot(s, date) { s.activityHistory = s.activityHistory || {}; const snap = buildSnapshot(s, date); const meaningful = snap.habits.some(h => h.current > 0); if (meaningful || s.activityHistory[date]) s.activityHistory[date] = snap; }
+function normalizeFitnessGoal(g) {
+  if (!g || g.type !== 'fitness') return g;
+  const f = g.fitness && typeof g.fitness === 'object' ? g.fitness : {};
+  const startWeight = Number(f.startWeight ?? g.startWeight ?? g.current ?? 0) || 0;
+  const targetWeight = Number(f.targetWeight ?? g.target ?? 0) || 0;
+  const entries = Array.isArray(f.weightEntries) ? f.weightEntries : [];
+  const measurements = Array.isArray(f.measurements) ? f.measurements : [];
+  const workouts = Array.isArray(f.workouts) ? f.workouts : [];
+  g.fitness = {
+    direction: f.direction === 'loss' ? 'loss' : 'gain',
+    startWeight, targetWeight,
+    height: Number(f.height) || 0,
+    age: Number(f.age) || 0,
+    gender: String(f.gender || ''),
+    weightEntries: entries.filter(x => x && x.date && Number.isFinite(Number(x.weight))).map(x => ({
+      id: String(x.id || uid('fw')), date: String(x.date).slice(0,10), weight: Number(x.weight), bodyFat: Number(x.bodyFat) || 0,
+      notes: String(x.notes || ''), updatedAt: x.updatedAt || new Date().toISOString()
+    })).sort((a,b)=>a.date.localeCompare(b.date)),
+    measurements: measurements.filter(x => x && x.date).map(x => ({ id:String(x.id||uid('fm')), date:String(x.date).slice(0,10), chest:Number(x.chest)||0, waist:Number(x.waist)||0, arms:Number(x.arms)||0, thighs:Number(x.thighs)||0, shoulders:Number(x.shoulders)||0, hips:Number(x.hips)||0, updatedAt:x.updatedAt||new Date().toISOString() })),
+    workouts: workouts.filter(x => x && x.date && x.exercise).map(x => ({ id:String(x.id||uid('fwk')), date:String(x.date).slice(0,10), exercise:String(x.exercise), weight:Number(x.weight)||0, reps:Number(x.reps)||0, sets:Number(x.sets)||0, notes:String(x.notes||''), updatedAt:x.updatedAt||new Date().toISOString() }))
+  };
+  const latest = g.fitness.weightEntries[g.fitness.weightEntries.length - 1];
+  g.current = latest ? latest.weight : startWeight;
+  g.target = targetWeight;
+  g.unit = 'kg';
+  g.category = 'Fitness';
+  return g;
+}
+
+
+function normalizeGoalComponents(g) {
+  if (!g || typeof g !== 'object') return g;
+  const legacy = g.type;
+  const old = g.components && typeof g.components === 'object' ? g.components : {};
+  const components = {
+    target: old.target !== undefined ? !!old.target : !['milestone','habit'].includes(legacy),
+    milestones: old.milestones !== undefined ? !!old.milestones : legacy === 'milestone',
+    habits: old.habits !== undefined ? !!old.habits : legacy === 'habit'
+  };
+  if (!components.target && !components.milestones && !components.habits) components.target = true;
+  g.components = components;
+  g.milestones = Array.isArray(g.milestones) ? g.milestones : [];
+  g.milestones = g.milestones.map((m, i) => ({
+    id: String(m?.id || uid('gm')),
+    title: String(m?.title ?? m?.name ?? (m?.value != null ? `${m.value}${g.unit || ''}` : `Milestone ${i+1}`)),
+    value: Number.isFinite(Number(m?.value)) ? Number(m.value) : null,
+    completed: !!m?.completed,
+    completedAt: m?.completedAt || '',
+    updatedAt: m?.updatedAt || new Date().toISOString()
+  }));
+  g.goalHabitIds = Array.isArray(g.goalHabitIds) ? g.goalHabitIds.map(String) : [];
+  if (g.type === 'fitness') {
+    // Weight milestones are derived from actual weight; never preserve a
+    // legacy checked state that contradicts the current weight.
+    const current = fitnessCurrentWeight(g);
+    const dir = g.fitness?.direction === 'loss' ? 'loss' : 'gain';
+    g.milestones.forEach(m => {
+      if (Number.isFinite(m.value)) {
+        const reached = dir === 'loss' ? current <= m.value : current >= m.value;
+        if (reached) {
+          m.completed = true;
+          m.completedAt = m.completedAt || new Date().toISOString();
+        } else {
+          m.completed = false;
+          m.completedAt = '';
+        }
+      }
+    });
+  }
+  return g;
+}
+function goalTargetProgress(g) {
+  if (!g?.components?.target) return null;
+  if (g.type === 'fitness') return fitnessProgress(g);
+  const target = Math.max(1, Number(g.target) || 1);
+  const current = Math.max(0, Number(g.current) || 0);
+  return Math.min(100, Math.round(current / target * 100));
+}
+function goalMilestoneProgress(g) {
+  if (!g?.components?.milestones) return null;
+  const ms = Array.isArray(g.milestones) ? g.milestones : [];
+  if (!ms.length) return 0;
+  return Math.round(ms.filter(m => m.completed).length / ms.length * 100);
+}
+function goalHabitProgress(g) {
+  if (!g?.components?.habits) return null;
+  const hs = (g.goalHabitIds || []).map(id => state.habits.find(h => h.id === id)).filter(Boolean).filter(h => !h.paused);
+  if (!hs.length) return 0;
+  return Math.round(hs.reduce((sum,h)=>sum+pct(h),0) / hs.length);
+}
+function goalOverallProgress(g) {
+  const t = goalTargetProgress(g);
+  if (t !== null) return t;
+  const m = goalMilestoneProgress(g);
+  if (m !== null) return m;
+  const h = goalHabitProgress(g);
+  return h === null ? 0 : h;
+}
+
+function fitnessEntries(g) { return g?.type === 'fitness' && Array.isArray(g.fitness?.weightEntries) ? g.fitness.weightEntries : []; }
+function fitnessCurrentWeight(g) { const e=fitnessEntries(g); return e.length ? Number(e[e.length-1].weight) : Number(g?.fitness?.startWeight || g?.current || 0); }
+function fitnessAverage(g, days=7) { const e=fitnessEntries(g); if (!e.length) return fitnessCurrentWeight(g); const cutoff=new Date(); cutoff.setHours(12,0,0,0); cutoff.setDate(cutoff.getDate()-(days-1)); const vals=e.filter(x=>new Date(x.date+'T12:00:00')>=cutoff).map(x=>Number(x.weight)).filter(Number.isFinite); const use=vals.length?vals:e.slice(-Math.min(days,e.length)).map(x=>Number(x.weight)); return use.reduce((a,b)=>a+b,0)/Math.max(1,use.length); }
+function fitnessProgress(g) { const f=g?.fitness||{}; const start=Number(f.startWeight)||0, target=Number(f.targetWeight)||0, current=fitnessCurrentWeight(g); if (f.direction==='loss') return target<start ? Math.min(100,Math.max(0,((start-current)/(start-target))*100)) : 0; return target>start ? Math.min(100,Math.max(0,((current-start)/(target-start))*100)) : 0; }
+function fitnessChange(g) { const f=g?.fitness||{}; return fitnessCurrentWeight(g)-(Number(f.startWeight)||0); }
+function fitnessWeeklyRate(g) { const e=fitnessEntries(g); if(e.length<2)return 0; const first=e[0], last=e[e.length-1]; const days=Math.max(1,(new Date(last.date)-new Date(first.date))/86400000); return (Number(last.weight)-Number(first.weight))/(days/7); }
+function fitnessGoalStatus(g) { const p=fitnessProgress(g); const f=g?.fitness||{}; const reached=f.direction==='loss' ? fitnessCurrentWeight(g)<=Number(f.targetWeight) : fitnessCurrentWeight(g)>=Number(f.targetWeight); return reached ? 'completed' : g.status==='paused' ? 'paused' : 'active'; }
+
 function normalizeState(s) {
   const input = (s && typeof s === 'object' && !Array.isArray(s)) ? s : {};
   const out = clone(input);
@@ -195,6 +304,7 @@ function normalizeState(s) {
 
   out.habits = Array.isArray(out.habits) ? out.habits : [];
   out.goals = Array.isArray(out.goals) ? out.goals : [];
+  out.goals.forEach(normalizeFitnessGoal);
   out.events = Array.isArray(out.events) ? out.events : [];
   out.reminders = Array.isArray(out.reminders) ? out.reminders : [];
   out.activityHistory = out.activityHistory && typeof out.activityHistory === 'object' && !Array.isArray(out.activityHistory) ? out.activityHistory : {};
@@ -213,9 +323,11 @@ function normalizeState(s) {
     timeFormat: out.settings?.timeFormat === '24h' ? '24h' : '12h',
     notifications: normalizeNotificationSettings({ ...defaultState.settings.notifications, ...(out.settings.notifications || {}) }),
     habits: { ...defaultState.settings.habits, ...(out.settings.habits || {}) },
+    fitness: { ...defaultState.settings.fitness, ...(out.settings.fitness || {}) },
     drive: { ...defaultState.settings.drive, ...(out.settings.drive || {}) },
     storage: { ...defaultState.settings.storage, ...(out.settings.storage || {}) }
   } : clone(defaultState.settings);
+  if (out.settings.drive.driveOptInVersion !== 1) { out.settings.drive.autoDaily = false; out.settings.drive.driveOptInVersion = 1; }
 
   out.habits = out.habits.map(h => {
     const habit = { ...h };
@@ -233,7 +345,8 @@ function normalizeState(s) {
     ...g,
     current: Math.max(0, Number(g.current) || 0),
     target: Math.max(1, Number(g.target) || 1)
-  }));
+  })).map(normalizeGoalComponents);
+
   out.events = out.events.filter(e => e && typeof e === 'object' && /^\d{4}-\d{2}-\d{2}$/.test(String(e.date || ''))).map(e => ({
     ...e,
     time: parseTime24(e.time) || '12:00:00',
@@ -246,6 +359,7 @@ function normalizeState(s) {
   }).map(r => ({
     ...r,
     time: parseTime24(r.time),
+    offsetMinutes: r.eventId ? 0 : undefined,
     days: r.eventId ? undefined : normalizeReminderDays(r.days)
   }));
 
@@ -268,7 +382,8 @@ function normalizeNotificationSettings(input = {}) {
   n.motivational = n.motivational !== false;
   n.weekly = n.weekly !== false;
   n.goal = n.goal !== false;
-  n.defaultEventOffset = [0,5,10,15,30,60,1440].includes(Number(n.defaultEventOffset)) ? Number(n.defaultEventOffset) : 0;
+  // Events always notify at the event time. Legacy offset settings are ignored.
+  delete n.defaultEventOffset;
   n.defaultHabitTime = parseTime24(n.defaultHabitTime) || '20:00:00';
   const days = Array.isArray(n.defaultHabitDays) ? n.defaultHabitDays.map(Number).filter(d => Number.isInteger(d) && d >= 0 && d <= 6) : [];
   n.defaultHabitDays = [...new Set(days)].sort((a,b) => a-b);
@@ -604,7 +719,8 @@ function save(options = {}) {
     } else if (!options.skipDrive && driveStorageSelected()) {
       scheduleDriveBackup();
     }
-  } catch (e) { console.error('Habitly save failed:', e); }
+    return true;
+  } catch (e) { console.error('Habitly save failed:', e); return false; }
 }
 
 function cloudStorageSelected() {
@@ -718,6 +834,25 @@ async function commitCloudDocument(expectedRevision, nextState, committedMutatio
 async function updateCloudDocument(expectedRevision, nextState, committedMutations = []) {
   return commitCloudDocument(expectedRevision, nextState, committedMutations);
 }
+function mergeCloudHydration(remoteState, localState) {
+  const remote = normalizeState(clone(remoteState || {}));
+  const local = normalizeState(clone(localState || {}));
+  const merged = normalizeState(clone(remote));
+  for (const kind of ['habits','goals','events','reminders']) {
+    const remoteMap = new Map((remote[kind] || []).map(x => [x.id, x]));
+    const tombstones = remote.syncMeta?.deleted?.[kind] || {};
+    for (const item of local[kind] || []) {
+      if (remoteMap.has(item.id)) continue;
+      const deletedAt = recordTime(tombstones[item.id]);
+      if (!deletedAt || deletedAt < recordTime(item.updatedAt)) merged[kind].push(clone(item));
+    }
+  }
+  // Activity history is date-scoped, so missing local dates can be safely retained.
+  merged.activityHistory = { ...(local.activityHistory || {}), ...(remote.activityHistory || {}) };
+  if (local.profile?.avatar && !merged.profile?.avatar) merged.profile.avatar = local.profile.avatar;
+  return normalizeState(merged);
+}
+
 async function reconcileCloudDocument() {
   if (!cloudStorageSelected() || !currentAuthUser?.id) return false;
   // A remote read is asynchronous. A user can edit Habitly while it is in
@@ -756,10 +891,23 @@ async function reconcileCloudDocument() {
   const before = createSyncSnapshot(state);
   const pending = pendingMutations(state);
   if (!pending.length && isSuspiciousEmptySync(state, remoteState, [])) {
-    throw new Error('Sync safety guard: refusing to hydrate valid local data from an unexplained empty cloud state');
+    // A fresh/partial cloud document must never erase a populated local cache.
+    // Preserve local records that are not explicitly tombstoned remotely, then
+    // publish those preserved records back to the cloud through the normal CAS path.
+    const protectedState = mergeCloudHydration(remoteState, state);
+    state = normalizeState(protectedState);
+    state.syncMeta.cloudRevision = cloudRevision;
+    appendSyncMutations(remoteState, state);
+    state.syncMeta.pending = dirtyFromMutations();
+    syncBaseState = createSyncSnapshot(remoteState);
+    syncLastSavedSnapshot = createSyncSnapshot(state);
+    cloudSyncAvailable = true;
+    cloudSyncError = 'Cloud state was incomplete; local records were protected and will be reconciled.';
+    if (currentStorageKey) localStorage.setItem(currentStorageKey, JSON.stringify(state));
+    return true;
   }
   const avatar = state.profile?.avatar || '';
-  const next = pending.length ? adoptRemoteWithPending(remoteState, state, syncBaseState) : remoteState;
+  const next = pending.length ? adoptRemoteWithPending(remoteState, state, syncBaseState) : mergeCloudHydration(remoteState, state);
   if (avatar && !next.profile.avatar) next.profile.avatar = avatar;
   next.settings.storage = { ...(next.settings.storage || {}), mode: 'cloud', setupCompleted:true };
   state = normalizeState(next);
@@ -772,7 +920,18 @@ async function reconcileCloudDocument() {
     syncBaseState = createSyncSnapshot(remoteState);
     syncLastSavedSnapshot = createSyncSnapshot(state);
     syncDirty = dirtyFromMutations();
-  } else resetSyncTracking(state);
+  } else {
+    const preserved = JSON.stringify(createSyncSnapshot(remoteState)) !== JSON.stringify(createSyncSnapshot(state));
+    if (preserved) {
+      state.syncMeta.mutations = [];
+      appendSyncMutations(remoteState, state);
+      state.syncMeta.pending = dirtyFromMutations();
+      syncBaseState = createSyncSnapshot(remoteState);
+      syncLastSavedSnapshot = createSyncSnapshot(state);
+      syncDirty = dirtyFromMutations();
+      cloudSyncPending = pendingMutations(state).length > 0;
+    } else resetSyncTracking(state);
+  }
   if (currentStorageKey) localStorage.setItem(currentStorageKey, JSON.stringify(state));
   return JSON.stringify(before) !== JSON.stringify(createSyncSnapshot(state));
 }
@@ -950,7 +1109,7 @@ function driveStorageSelected() {
 }
 
 function scheduleDriveBackup() {
-  if (!driveStorageSelected() || driveSettings().autoDaily === false || driveLoginSyncPending || driveLoginSyncBusy) return;
+  if (!driveStorageSelected() || driveSettings().autoDaily !== true || driveLoginSyncPending || driveLoginSyncBusy) return;
   // In Drive storage mode, Drive is the active synchronization authority.
   // In Both mode, Supabase is primary and Drive only receives acknowledged
   // cloud snapshots. Never let an unavailable Supabase table block Drive mode.
@@ -1018,18 +1177,45 @@ function todayISO() { const d = new Date(); return new Date(d.getFullYear(), d.g
 function habitCurrent(h, date = todayISO()) { return Math.max(0, Number(date === todayISO() ? h.current : ((h.daily || {})[date] ?? 0)) || 0); }
 function habitPctForDate(h, date = todayISO()) { return Math.min(100, Math.round(habitCurrent(h, date) / Math.max(1, Number(h.target) || 1) * 100)); }
 function pct(h) { return habitPctForDate(h, todayISO()); }
-function goalPct(g) { return Math.min(100, Math.round((Math.max(0, Number(g.current) || 0) / Math.max(1, Number(g.target) || 1)) * 100)); }
-function formatDate(value) { return new Date(value + 'T12:00:00').toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }); }
-function daysLeft(date) { const a = new Date(); a.setHours(0, 0, 0, 0); const b = new Date(date + 'T00:00:00'); return Math.ceil((b - a) / 86400000); }
+function goalPct(g) { return Math.round(goalOverallProgress(g)); }
+function formatDate(value) {
+  const raw = String(value || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) return 'No deadline';
+  const d = new Date(raw + 'T12:00:00');
+  return Number.isNaN(d.getTime()) ? 'No deadline' : d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+}
+function daysLeft(date) {
+  const raw = String(date || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) return null;
+  const a = new Date(); a.setHours(0, 0, 0, 0);
+  const b = new Date(raw + 'T00:00:00');
+  if (Number.isNaN(b.getTime())) return null;
+  return Math.ceil((b - a) / 86400000);
+}
 function formatNumber(n) { return Number(n).toLocaleString('en-IN'); }
 
 function parseTime24(value) {
   const raw = String(value || '').trim();
+  // Accept normal 24-hour input, with or without seconds.
   let m = raw.match(/^([01]\d|2[0-3]):([0-5]\d)(?::([0-5]\d))?$/);
   if (m) return `${m[1]}:${m[2]}:${m[3] || '00'}`;
+
+  // Accept standard 12-hour input such as 3:30 PM.
   m = raw.match(/^(\d{1,2}):([0-5]\d)(?::([0-5]\d))?\s*(AM|PM)$/i);
   if (!m) return '';
-  let h = Number(m[1]), min = Number(m[2]), sec = Number(m[3] || 0), ap = m[4].toUpperCase();
+
+  let h = Number(m[1]);
+  const min = Number(m[2]);
+  const sec = Number(m[3] || 0);
+  const ap = m[4].toUpperCase();
+
+  // Be tolerant of a common manual-entry form such as “15:30 PM”.
+  // The numeric time is already unambiguously 24-hour, so the suffix is
+  // ignored instead of making an otherwise valid event impossible to save.
+  if (h >= 13 && h <= 23) {
+    return `${String(h).padStart(2,'0')}:${String(min).padStart(2,'0')}:${String(sec).padStart(2,'0')}`;
+  }
+
   if (h < 1 || h > 12) return '';
   if (ap === 'AM') h = h === 12 ? 0 : h;
   else h = h === 12 ? 12 : h + 12;
@@ -1041,10 +1227,10 @@ function userTimeFormat() {
 function formatTime(value) {
   const t = parseTime24(value);
   if (!t) return String(value || '');
-  const [h,m,sec] = t.split(':').map(Number);
-  if (userTimeFormat() === '24h') return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`;
+  const [h,m] = t.split(':').map(Number);
+  if (userTimeFormat() === '24h') return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
   const ap = h >= 12 ? 'PM' : 'AM', hh = h % 12 || 12;
-  return `${hh}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')} ${ap}`;
+  return `${hh}:${String(m).padStart(2,'0')} ${ap}`;
 }
 function formatTimeShort(value) {
   const t = parseTime24(value);
@@ -1343,8 +1529,8 @@ function reminderScheduledTime(reminder, now = new Date()) {
     const event = reminderEventFor(reminder);
     if (!event) return null;
     const base = new Date(`${event.date}T${parseTime24(event.time) || '00:00:00'}`);
-    const offset = Number(reminder.offsetMinutes) || 0;
-    base.setMinutes(base.getMinutes() - offset);
+    // Legacy before-event offsets are intentionally ignored.
+    base.setMinutes(base.getMinutes());
     return base;
   }
   const parsed = parseTime24(reminder.time);
@@ -1436,6 +1622,7 @@ function checkReminderNotifications(force = false) {
 function startReminderService() {
   clearInterval(reminderUiTimer);
   clearInterval(headerClockTimer);
+  clearTimeout(headerClockTimer);
   headerClockTimer = null;
   clearTimeout(reminderSchedulerTimer);
   reminderUiTimer = setInterval(() => { checkReminderNotifications(); refreshReminderUi(); }, 10000);
@@ -1496,88 +1683,50 @@ function sidebar(route) { return `<aside class="sidebar"><div class="brand">${lo
 function mobileDrawer(route) { return `<div class="mobile-drawer" id="drawer" aria-hidden="true"><div class="scrim" data-close-drawer></div><aside class="drawer"><div class="drawer-head"><div class="mobile-brand">${logo()}<strong>Habitly</strong></div><button class="drawer-close" data-close-drawer aria-label="Close menu">×</button></div><nav class="main-nav">${navItems.map(([r, t, i]) => `<button class="nav-item ${route === r ? 'active' : ''}" data-route="${r}"><span class="nav-icon">${navIcon(i)}</span><span>${t}</span></button>`).join('')}</nav><div class="sidebar-bottom"><button class="profile-card" data-route="settings" aria-label="Open account settings"><span class="avatar">${avatarMarkup()}</span><span class="profile-copy"><strong>${esc(state.profile?.name || 'Prem Kumar')}</strong><small>View profile</small></span><span class="chevron">${icon('chevron')}</span></button><button class="logout" type="button" data-logout aria-label="Log out of Habitly">${icon('logout')}<span>Log out</span></button></div></aside></div>`; }
 
 function reminderOverviewMarkup(date) {
-  // This panel is an UPCOMING REMINDER view, not an event list.
-  // Only enabled reminders with a real next occurrence on the selected day
-  // belong here. Calendar events without reminders must never appear here,
-  // and disabled/expired reminders must not be presented as upcoming.
   const selectedDate = String(date || calendarSelectedDate || todayISO());
   const now = new Date();
-  const rows = [];
+  const selectedEvents = (state.events||[]).filter(e=>e && e.date===selectedDate).sort((a,b)=>String(a.time).localeCompare(String(b.time)));
+  const selectedHabitReminders = (state.reminders||[]).filter(r=>r && r.source==='manual' && !r.eventId && r.enabled!==false).map(r=>{
+    const next=nextReminderOccurrence(r,new Date(`${selectedDate}T00:00:00`));
+    if(!next || dateISO(next)!==selectedDate) return null;
+    const h=reminderHabitFor(r); if(!h || h.paused || state.settings?.notifications?.habitReminders===false) return null;
+    return {kind:'habit',id:r.id,title:h.name,emoji:h.emoji||'🔔',time:r.time,next,detail:`Habit reminder · ${reminderDaysLabel(r.days)}`};
+  }).filter(Boolean).sort((a,b)=>a.next-b.next);
 
-  for (const reminder of (state.reminders || [])) {
-    if (!reminder || reminder.source !== 'manual' || reminder.enabled === false) continue;
-    const next = nextReminderOccurrence(reminder, now);
-    if (!next || dateISO(next) !== selectedDate) continue;
-
-    if (reminder.eventId) {
-      if (state.settings?.notifications?.eventReminders === false) continue;
-      const event = reminderEventFor(reminder);
-      if (!event) continue;
-      rows.push({
-        kind: 'event',
-        id: reminder.id,
-        eventId: event.id,
-        title: event.title,
-        emoji: event.emoji || '📅',
-        time: next,
-        reminderTime: formatTimeShort(next),
-        detail: `Event ${formatTimeShort(event.time)} · Reminder ${formatTimeShort(next)} · ${reminderSoundLabel(reminder.sound)}`,
-        sortKey: next.getTime()
-      });
-    } else {
-      if (state.settings?.notifications?.habitReminders === false) continue;
-      const habit = reminderHabitFor(reminder);
-      if (!habit || habit.paused) continue;
-      rows.push({
-        kind: 'habit',
-        id: reminder.id,
-        title: habit.name,
-        emoji: habit.emoji || '🔔',
-        time: next,
-        reminderTime: formatTimeShort(next),
-        detail: `${reminderDaysLabel(reminder.days)} · ${reminderSoundLabel(reminder.sound)}`,
-        sortKey: next.getTime()
-      });
+  const upcoming = [];
+  for(const e of (state.events||[])){
+    if(state.settings?.notifications?.eventReminders===false) continue;
+    const eventNext=nextEventOccurrence(e,now);
+    if(!eventNext) continue;
+    const linked=state.reminders.find(r=>r.eventId===e.id && r.source==='manual' && r.enabled!==false);
+    const reminderAt=linked ? nextEventReminderOccurrence(linked,now) : eventNext;
+    // The bell and upcoming list represent the event itself, but show an
+    // earlier reminder time when one exists.
+    upcoming.push({kind:'event',id:linked?.id||`event:${e.id}`,eventId:e.id,title:e.title,emoji:e.emoji||'📅',eventAt:eventNext,at:reminderAt||eventNext,detail:linked && `Event at ${formatTimeShort(e.time)}`});
+  }
+  if(state.settings?.notifications?.habitReminders!==false){
+    for(const r of (state.reminders||[])){
+      if(!r || r.source!=='manual' || r.eventId || r.enabled===false) continue;
+      const h=reminderHabitFor(r); if(!h||h.paused) continue;
+      const next=nextReminderOccurrence(r,now); if(next) upcoming.push({kind:'habit',id:r.id,title:h.name,emoji:h.emoji||'🔔',eventAt:next,at:next,detail:`Habit reminder · ${reminderDaysLabel(r.days)}`});
     }
   }
+  upcoming.sort((a,b)=>a.at-b.at);
+  const selectedEventMarkup = selectedEvents.map(e=>{
+    const linked=state.reminders.find(r=>r.eventId===e.id && r.source==='manual');
+    const future=new Date(`${e.date}T${parseTime24(e.time)||'00:00:00'}`).getTime()>now.getTime();
+    return `<div class="calendar-reminder-row ${future?'is-upcoming':'is-past'}"><span class="reminder-emoji">${esc(e.emoji||'📅')}</span><span class="reminder-copy"><strong>${esc(e.title)}</strong><small>Event · ${esc(formatTimeShort(e.time))}${linked ? ' · Reminder at event time' : ''}</small></span><span class="reminder-status">${future?'Upcoming':'Passed'}</span><button class="reminder-edit-btn" type="button" data-edit-event="${esc(e.id)}" aria-label="Edit event">${icon('edit')}</button><button class="icon-delete reminder-overview-delete" type="button" data-delete-event="${esc(e.id)}" aria-label="Delete event">${icon('trash')}</button></div>`;
+  }).join('');
+  const selectedHabitMarkup = selectedHabitReminders.map(r=>`<div class="calendar-reminder-row"><span class="reminder-emoji">${esc(r.emoji)}</span><span class="reminder-copy"><strong>${esc(r.title)}</strong><small>${esc(formatTimeShort(r.time))} · Habit reminder</small></span><span class="reminder-status">Scheduled</span><button class="reminder-edit-btn" type="button" data-edit-reminder="${esc(r.id)}" aria-label="Edit reminder">${icon('edit')}</button><button class="icon-delete reminder-overview-delete" type="button" data-delete-reminder="${esc(r.id)}" aria-label="Delete reminder">${icon('trash')}</button></div>`).join('');
+  const upcomingMarkup = upcoming.slice(0,10).map(r=>`<div class="calendar-reminder-row"><span class="reminder-emoji">${esc(r.emoji)}</span><span class="reminder-copy"><strong>${esc(r.title)}</strong><small>${esc(formatDate(dateISO(r.eventAt)))} · ${esc(formatTimeShort(r.at))} · ${esc(r.detail)}</small></span><span class="reminder-status">${r.kind==='event'?'Event':'Habit'}</span>${r.kind==='event'?`<button class="reminder-edit-btn" type="button" data-edit-event="${esc(r.eventId)}" aria-label="Edit event">${icon('edit')}</button>`:`<button class="reminder-edit-btn" type="button" data-edit-reminder="${esc(r.id)}" aria-label="Edit reminder">${icon('edit')}</button>`}</div>`).join('');
 
-  rows.sort((a, b) => a.sortKey - b.sortKey);
-
-  if (!rows.length) {
-    return `
-      <div class="reminder-overview-empty">
-        <div class="reminder-empty-icon">${icon('bell')}</div>
-        <strong>No upcoming reminders</strong>
-        <small>Events appear here only when their reminder is enabled. Habit reminders appear when their next scheduled occurrence falls on this day.</small>
-        <button class="primary-btn reminder-add-btn" type="button" data-add-reminder>
-          <span aria-hidden="true">+</span><span>Add Reminder</span>
-        </button>
-      </div>`;
-  }
-
-  return `
-    <div class="reminder-overview-list">
-      ${rows.map(row => `
-        <div class="calendar-reminder-row">
-          <span class="reminder-emoji">${esc(row.emoji)}</span>
-          <span class="reminder-copy">
-            <strong>${esc(row.title)}</strong>
-            <small>${esc(row.reminderTime)} · ${esc(row.detail)}</small>
-          </span>
-          <label class="mini-switch" title="Disable reminder">
-            <input type="checkbox" data-toggle-reminder="${esc(row.id)}" checked>
-            <i></i>
-          </label>
-          ${row.kind === 'event'
-            ? `<button class="reminder-edit-btn" type="button" data-edit-event-reminder="${esc(row.eventId)}" aria-label="Edit reminder for ${esc(row.title)}">${icon('edit')}</button>`
-            : `<button class="reminder-edit-btn" type="button" data-edit-reminder="${esc(row.id)}" aria-label="Edit ${esc(row.title)} reminder">${icon('edit')}</button>`}
-          <button class="icon-delete reminder-overview-delete" type="button" data-delete-reminder="${esc(row.id)}" aria-label="Delete reminder for ${esc(row.title)}" title="Delete reminder">${icon('trash')}</button>
-        </div>`).join('')}
-    </div>
-    <button class="primary-btn reminder-add-btn" type="button" data-add-reminder>
-      <span aria-hidden="true">+</span><span>Add Reminder</span>
-    </button>`;
+  return `<div class="reminder-overview-sections">
+    <section class="reminder-overview-subsection"><div class="reminder-subhead"><div><strong>Selected day</strong><small>${esc(formatDate(selectedDate))}</small></div><span>${selectedEvents.length+selectedHabitReminders.length}</span></div>${selectedEventMarkup||selectedHabitMarkup?`<div class="reminder-overview-list">${selectedEventMarkup}${selectedHabitMarkup}</div>`:'<div class="reminder-overview-empty compact"><span>No events or reminders for this day.</span></div>'}</section>
+    <section class="reminder-overview-subsection"><div class="reminder-subhead"><div><strong>Upcoming reminders</strong><small>Next scheduled event and habit notifications</small></div><span>${upcoming.length}</span></div>${upcomingMarkup?`<div class="reminder-overview-list">${upcomingMarkup}</div>`:'<div class="reminder-overview-empty compact"><span>No upcoming reminders.</span></div>'}</section>
+    <button class="primary-btn reminder-add-btn" type="button" data-add-event><span aria-hidden="true">+</span><span>Add Event</span></button>
+  </div>`;
 }
+
 function formatReminderTime(value) {
   if (!value) return 'No time';
   const [h, m] = String(value).split(':').map(Number);
@@ -1593,14 +1742,11 @@ function reminderDaysLabel(days) {
   if (values.length === 7) return 'Every day';
   return values.map(d => labels[d]).join(' · ');
 }
-function eventReminderTimeValue(date, time, offsetMinutes = 0) {
-  const parsed = parseTime24(time);
-  if (!date || !parsed) return parsed || '';
-  const base = new Date(`${date}T${parsed}`);
-  if (Number.isNaN(base.getTime())) return parsed;
-  base.setMinutes(base.getMinutes() - (Number(offsetMinutes) || 0));
-  return `${String(base.getHours()).padStart(2,'0')}:${String(base.getMinutes()).padStart(2,'0')}:${String(base.getSeconds()).padStart(2,'0')}`;
+function eventReminderTimeValue(date, time) {
+  if (!date || !time) return '';
+  return parseTime24(time) || '';
 }
+
 function reminderForm(id) {
   const eventReminder = id ? state.reminders.find(r => r.id === id && r.source === 'manual' && r.eventId) : null;
   if (eventReminder) {
@@ -1622,7 +1768,7 @@ function reminderForm(id) {
     id ? 'Update the time, selected days, sound, or status of this habit reminder.' : 'Choose when and on which days Habitly should remind you.',
     `<form class="form" id="reminderForm">
       <div class="field"><label>Habit *</label><select name="habitId" required>${habits.map(h => `<option value="${esc(h.id)}" ${h.id === habitId ? 'selected' : ''}>${esc(h.emoji || '🔔')} ${esc(h.name)}</option>`).join('')}</select></div>
-      <div class="field"><label>Reminder time *</label><input name="time" type="time" step="1" required value="${esc(defaultTime)}"></div>
+      <div class="field"><label>Reminder time *</label><input name="time" class="time-text-input" type="text" required value="${esc(formatTimeShort(defaultTime))}" placeholder="${userTimeFormat()==='12h'?'8:00 PM':'20:00'}" autocomplete="off"></div>
       <div class="field"><label>Repeat on</label><div class="reminder-day-picker" role="group" aria-label="Days for habit reminder">${dayOptions.map(([v,label]) => `<label class="reminder-day"><input type="checkbox" name="days" value="${v}" ${selectedDays.has(v) ? 'checked' : ''}><span>${label}</span></label>`).join('')}</div><small class="field-help">The reminder will use the next selected day after the current time.</small></div>
       <div class="field"><label>Reminder sound</label><div class="form-grid two"><select name="sound">${[['gentle','Gentle Bell'],['chime','Soft Chime'],['calm','Calm'],['classic','Classic'],['simple','Simple'],['bright','Bright'],['marimba','Marimba'],['digital','Digital'],['none','No Sound']].map(([v,t]) => `<option value="${v}" ${v === (reminder?.sound || 'gentle') ? 'selected' : ''}>${t}</option>`).join('')}</select><button type="button" class="secondary-btn reminder-preview-btn" id="previewReminderSound">▶ Preview sound</button></div></div>
       ${id ? `<label class="switch-row"><span><b>Reminder enabled</b><small>Turn this reminder off without deleting it.</small></span><input type="checkbox" name="enabled" ${reminder?.enabled !== false ? 'checked' : ''}><i></i></label>` : ''}
@@ -1665,14 +1811,15 @@ function reminderForm(id) {
 function nextEventOccurrence(event, from = new Date()) {
   if (!event || !event.date || !event.time) return null;
   const base = new Date(`${event.date}T${parseTime24(event.time) || '00:00:00'}`);
-  return Number.isNaN(base.getTime()) || base.getTime() < from.getTime() ? null : base;
+  return Number.isNaN(base.getTime()) || base.getTime() <= from.getTime() ? null : base;
 }
 function nextEventReminderOccurrence(reminder, from = new Date()) {
   const event = reminderEventFor(reminder);
   if (!event) return null;
   const base = nextEventOccurrence(event, from);
   if (!base) return null;
-  base.setMinutes(base.getMinutes() - (Number(reminder.offsetMinutes) || 0));
+  // Event reminders always fire at the event time. Legacy before-event offsets are ignored.
+  base.setMinutes(base.getMinutes());
   return base.getTime() >= from.getTime() ? base : null;
 }
 function nextReminderOccurrence(reminder, from = new Date()) {
@@ -1738,7 +1885,7 @@ function eventNotificationCount() {
   const notifications = state.settings?.notifications || defaultState.settings.notifications;
   // Event count is independent of the event's reminder/offset. An event with
   // no reminder still counts, while an event with a reminder counts only once.
-  const events = data.events.length;
+  const events = notifications.eventReminders !== false ? data.events.length : 0;
   const habits = notifications.habitReminders !== false ? data.habits.length : 0;
   return events + habits;
 }
@@ -1757,7 +1904,7 @@ function reminderSectionMarkup(title, items, emptyText, options = {}) {
       return `<div class="reminder-item-row">
         <button class="reminder-item ${editable ? 'is-habit-reminder' : 'is-event-reminder'}" type="button" ${action}>
           <span class="reminder-emoji">${esc(i.emoji)}</span>
-          <span class="reminder-copy"><strong>${esc(i.title)}</strong><small>${esc(formatTimeShort(i.time))}${events && i.hasReminder ? ' · Reminder set' : ''}</small></span>
+          <span class="reminder-copy"><strong>${esc(i.title)}</strong><small>${esc(formatTimeShort(i.time))}${events && i.hasReminder ? ' · Reminder at event time' : ''}</small></span>
           <span class="reminder-dot"></span>
         </button>
         ${deleteButton}
@@ -1826,28 +1973,61 @@ function renderHabitCards(filter = 'all', sort = 'recent') {
 }
 
 function goalsPage() {
-  return shell('goals', `<div class="page-title goals-title"><span class="eyebrow">YOUR FUTURE, ONE GOAL AT A TIME</span><h1>My Goals</h1><p>Set meaningful goals, track your progress, and celebrate every milestone.</p></div><div class="page-actions"><button class="primary-btn" data-open-goal>+ Add Goal</button></div><section class="goals-layout"><div><div class="filters goal-filters" id="goalFilters"><button class="filter active" data-goal-filter="all">All Goals</button><button class="filter" data-goal-filter="active">Active</button><button class="filter" data-goal-filter="ontrack">On Track</button><button class="filter" data-goal-filter="completed">Completed</button><button class="filter" data-goal-filter="paused">Paused</button></div><div class="goal-list" id="goalCards"></div></div><aside class="goals-side"><article class="panel overview-card"><h2>Goals Overview</h2><div class="overview-grid"><div><strong>${state.goals.length}</strong><span>Total Goals</span></div><div><strong>${state.goals.filter(g => g.status !== 'paused' && goalPct(g) < 100).length}</strong><span>Active</span></div><div><strong>${state.goals.filter(g => g.status === 'paused').length}</strong><span>Paused</span></div><div><strong>${state.goals.filter(g => goalPct(g) >= 100 || g.status === 'completed').length}</strong><span>Completed</span></div></div><button class="view-link" data-goal-filter="all">View all goals →</button></article><article class="panel category-card"><h2>Goals by Category</h2><div class="goal-category-list">${Object.entries(state.goals.reduce((acc,g)=>{acc[g.category]=(acc[g.category]||0)+1;return acc;},{})).map(([category,count])=>`<div><span>${esc(category)}</span><b>${count}</b></div>`).join('') || '<div class="muted-copy">No goals yet.</div>'}</div></article></aside></section>`);
+  return shell('goals', `<div class="page-title goals-title"><span class="eyebrow">YOUR FUTURE, ONE GOAL AT A TIME</span><h1>My Goals</h1><p>Set meaningful goals, track your progress, and celebrate every milestone.</p></div><div class="page-actions"><button type="button" class="primary-btn" data-open-goal>+ Add Goal</button></div><section class="goals-layout"><div><div class="filters goal-filters" id="goalFilters"><button class="filter active" data-goal-filter="all">All Goals</button><button class="filter" data-goal-filter="active">Active</button><button class="filter" data-goal-filter="ontrack">On Track</button><button class="filter" data-goal-filter="completed">Completed</button><button class="filter" data-goal-filter="paused">Paused</button></div><div class="goal-list" id="goalCards"></div></div><aside class="goals-side"><article class="panel overview-card"><h2>Goals Overview</h2><div class="overview-grid"><div><strong>${state.goals.length}</strong><span>Total Goals</span></div><div><strong>${state.goals.filter(g => g.status !== 'paused' && goalPct(g) < 100).length}</strong><span>Active</span></div><div><strong>${state.goals.filter(g => g.status === 'paused').length}</strong><span>Paused</span></div><div><strong>${state.goals.filter(g => goalPct(g) >= 100 || g.status === 'completed').length}</strong><span>Completed</span></div></div><button class="view-link" data-goal-filter="all">View all goals →</button></article><article class="panel category-card"><h2>Goals by Category</h2><div class="goal-category-list">${Object.entries(state.goals.reduce((acc,g)=>{acc[g.category]=(acc[g.category]||0)+1;return acc;},{})).map(([category,count])=>`<div><span>${esc(category)}</span><b>${count}</b></div>`).join('') || '<div class="muted-copy">No goals yet.</div>'}</div></article></aside></section>`);
 }
+
+function fitnessGoalCard(g, p, left) {
+  const current=fitnessCurrentWeight(g), avg=fitnessAverage(g,7), change=fitnessChange(g), rate=fitnessWeeklyRate(g);
+  const sign=change>=0?'+':'';
+  const ms=(g.milestones||[]), doneMs=ms.filter(m=>m.completed).length;
+  return `<article class="goal-card fitness-goal-card ${g.status === 'paused' ? 'is-paused' : ''}" data-goal-id="${esc(g.id)}"><div class="goal-emoji">🏋️</div><div class="goal-main"><strong>${esc(g.title)}</strong><span class="goal-category">Fitness · ${g.fitness?.direction==='loss'?'Weight Loss':'Weight Gain'}</span><small>${current.toFixed(1)} kg now · ${Number(g.fitness?.targetWeight||g.target).toFixed(1)} kg target</small><div class="goal-component-chips"><span>Target</span>${g.components?.milestones?`<span>${doneMs}/${ms.length} milestones</span>`:''}${g.components?.habits?`<span>Habits linked</span>`:''}</div></div><div class="goal-progress"><div class="goal-progress-top"><strong>${p}%</strong><button class="goal-update-btn" data-fitness-goal="${esc(g.id)}">Track</button></div><div class="progress-track"><i style="width:${p}%"></i></div><small>7-day avg ${avg.toFixed(1)} kg · ${sign}${rate.toFixed(2)} kg/week</small></div><div class="goal-date">${icon('calendar')}<span>${formatDate(g.date)}</span><b>${left === null ? 'No deadline' : left >= 0 ? left + ' days left' : 'Past due'}</b></div><button class="dots-btn goal-dots" data-menu="goal:${esc(g.id)}" aria-label="Goal actions">${icon('dots')}</button></article>`;
+}
+function renderFitnessChart(g) {
+  const e=fitnessEntries(g); if(e.length<2) return '<div class="fitness-chart-empty">Add at least two weigh-ins to see your trend.</div>';
+  const w=720,h=250,pad=28, vals=e.map(x=>Number(x.weight)), min=Math.min(...vals),max=Math.max(...vals), range=Math.max(.5,max-min), points=e.map((x,i)=>{const X=pad+(i/(e.length-1))*(w-pad*2),Y=h-pad-((Number(x.weight)-min)/range)*(h-pad*2);return [X,Y,x.weight,x.date]}), path=points.map((q,i)=>(i?'L':'M')+q[0].toFixed(1)+','+q[1].toFixed(1)).join(' ');
+  return `<svg class="fitness-chart" viewBox="0 0 ${w} ${h}" role="img" aria-label="Weight trend"><line x1="${pad}" y1="${h-pad}" x2="${w-pad}" y2="${h-pad}" class="chart-axis"/><path d="${path}" class="fitness-line" fill="none"/>${points.map(q=>`<circle cx="${q[0]}" cy="${q[1]}" r="4" class="fitness-dot"><title>${q[3]} · ${Number(q[2]).toFixed(1)} kg</title></circle>`).join('')}</svg>`;
+}
+function fitnessDashboard(id) {
+  const g=state.goals.find(x=>x.id===id); if(!g||g.type!=='fitness') return;
+  normalizeFitnessGoal(g);
+  const f=g.fitness||{}, current=fitnessCurrentWeight(g), avg7=fitnessAverage(g,7), avg30=fitnessAverage(g,30), change=fitnessChange(g), rate=fitnessWeeklyRate(g), p=goalPct(g), entries=fitnessEntries(g).slice().reverse();
+  const sign=change>=0?'+':'-', settings=state.settings?.fitness||defaultState.settings.fitness;
+  const measurements=(f.measurements||[]).slice().reverse(), workouts=(f.workouts||[]).slice().reverse();
+  const milestoneBlock = g.components?.milestones ? `<section class="fitness-panel goal-component-panel"><div class="fitness-section-head"><div><h4>Milestones</h4><small>Checkpoints are based on your actual weight.</small></div><span>${(g.milestones||[]).filter(m=>m.completed).length}/${(g.milestones||[]).length}</span></div>${(g.milestones||[]).map(m=>`<div class="fitness-check-row ${m.completed?'done':''}"><span class="milestone-status">${m.completed?'✓':'○'}</span><span><b>${esc(m.title)}</b>${m.value!=null?`<small>${Number(m.value).toFixed(1)} kg</small>`:''}</span><strong>${m.completed?'Reached':'Not yet'}</strong></div>`).join('')||'<div class="muted-copy">No milestones added.</div>'}</section>` : '';
+  const habitBlock = g.components?.habits ? `<section class="fitness-panel goal-component-panel"><div class="fitness-section-head"><div><h4>Supporting habits</h4><small>Habits that contribute to this fitness goal.</small></div></div>${(g.goalHabitIds||[]).map(hid=>state.habits.find(h=>h.id===hid)).filter(Boolean).map(h=>`<div class="fitness-check-row"><span>${esc(h.emoji||'•')}</span><span><b>${esc(h.name)}</b><small>Today ${pct(h)}%</small></span><strong>${pct(h)}%</strong></div>`).join('')||'<div class="muted-copy">No supporting habits linked.</div>'}</section>` : '';
+  const bodyBlock = settings.bodyMeasurements ? `<section class="fitness-panel"><div class="fitness-section-head"><div><h4>Body measurements</h4><small>Optional advanced tracking enabled in Settings.</small></div></div><form id="fitnessMeasurementForm" class="form"><div class="form-grid two"><div class="field"><label>Date</label><input name="date" type="date" value="${todayISO()}" required></div><div class="field"><label>Chest (in)</label><input name="chest" type="number" step="0.1"></div><div class="field"><label>Waist (in)</label><input name="waist" type="number" step="0.1"></div><div class="field"><label>Arms (in)</label><input name="arms" type="number" step="0.1"></div><div class="field"><label>Thighs (in)</label><input name="thighs" type="number" step="0.1"></div><div class="field"><label>Shoulders (in)</label><input name="shoulders" type="number" step="0.1"></div></div><div class="form-actions"><button class="secondary-btn">Save measurements</button></div></form>${measurements.slice(0,4).map(m=>`<div class="fitness-history-row"><b>${formatDate(m.date)}</b><span>Chest ${m.chest||'—'} · Waist ${m.waist||'—'} · Arms ${m.arms||'—'}</span></div>`).join('')||'<div class="muted-copy">No measurements yet.</div>'}</section>` : '';
+  const workoutBlock = settings.workoutLogging ? `<section class="fitness-panel"><div class="fitness-section-head"><div><h4>Strength log</h4><small>Optional advanced tracking enabled in Settings.</small></div></div><form id="fitnessWorkoutForm" class="form"><div class="form-grid two"><div class="field"><label>Date</label><input name="date" type="date" value="${todayISO()}" required></div><div class="field"><label>Exercise *</label><input name="exercise" placeholder="Bench Press" required></div><div class="field"><label>Weight (kg)</label><input name="weight" type="number" step="0.5" min="0"></div><div class="field"><label>Sets</label><input name="sets" type="number" min="0" step="1"></div><div class="field"><label>Reps</label><input name="reps" type="number" min="0" step="1"></div><div class="field"><label>Notes</label><input name="notes" placeholder="e.g. felt strong"></div></div><div class="form-actions"><button class="secondary-btn">Log workout</button></div></form>${workouts.slice(0,8).map(w=>`<div class="fitness-history-row"><b>${esc(w.exercise)}</b><span>${formatDate(w.date)} · ${w.weight||0} kg · ${w.sets||0}×${w.reps||0}</span></div>`).join('')||'<div class="muted-copy">No strength records yet.</div>'}</section>` : '';
+  const bodyFatField = settings.bodyMeasurements ? `<div class="field"><label>Body fat % <small>(optional)</small></label><input name="bodyFat" type="number" step="0.1" min="0" max="100"></div>` : '';
+
+  modal('Fitness Dashboard', 'Weight tracking is always available. Advanced workout and body-measurement sections appear only when enabled in Settings.', `<div class="fitness-dashboard">
+    <section class="fitness-hero"><div><span class="eyebrow">${f.direction==='loss'?'WEIGHT LOSS':'WEIGHT GAIN'} GOAL</span><h3>${esc(g.title)}</h3><p>${Number(f.startWeight||0).toFixed(1)} kg → ${Number(f.targetWeight||0).toFixed(1)} kg · ${p}% complete</p></div><div class="fitness-progress-ring"><strong>${p}%</strong><span>complete</span></div></section>
+    <div class="fitness-kpis"><div><span>Current</span><strong>${current.toFixed(1)} kg</strong></div><div><span>7-day avg</span><strong>${avg7.toFixed(1)} kg</strong></div><div><span>30-day avg</span><strong>${avg30.toFixed(1)} kg</strong></div><div><span>Total change</span><strong>${change>=0?'+':''}${change.toFixed(1)} kg</strong></div><div><span>Weekly pace</span><strong>${rate>=0?'+':''}${rate.toFixed(2)} kg</strong><small>per week</small></div><div><span>Remaining</span><strong>${Math.abs(Number(f.targetWeight||0)-current).toFixed(1)} kg</strong></div></div>
+    <section class="fitness-panel"><div class="fitness-section-head"><div><h4>Weight trend</h4><small>Use averages and the trend instead of one day's number.</small></div><span>${entries.length} weigh-ins</span></div>${renderFitnessChart(g)}</section>
+    <section class="fitness-panel"><div class="fitness-section-head"><div><h4>Log weight</h4><small>Record one measurement per day. Updating an existing date replaces that day's value.</small></div></div><form id="fitnessWeightForm" class="form"><div class="form-grid two"><div class="field"><label>Date *</label><input name="date" type="date" value="${todayISO()}" required></div><div class="field"><label>Weight (kg) *</label><input name="weight" type="number" step="0.1" min="1" value="${current.toFixed(1)}" required></div>${bodyFatField}<div class="field"><label>Note <small>(optional)</small></label><input name="notes" placeholder="e.g. morning, before breakfast"></div></div><div class="form-actions"><button class="primary-btn">Save weight →</button></div></form></section>
+    ${milestoneBlock}${habitBlock}${bodyBlock}${workoutBlock}
+  </div>`);
+  document.getElementById('fitnessWeightForm')?.addEventListener('submit',e=>{e.preventDefault();const fd=new FormData(e.target),date=String(fd.get('date')),weight=Number(fd.get('weight'));if(!date||!Number.isFinite(weight)||weight<=0)return toast('Enter a valid date and weight');f.weightEntries=Array.isArray(f.weightEntries)?f.weightEntries:[];const existing=f.weightEntries.find(x=>x.date===date);const row={id:existing?.id||uid('fw'),date,weight,bodyFat:settings.bodyMeasurements?(Number(fd.get('bodyFat'))||0):0,notes:String(fd.get('notes')||''),updatedAt:new Date().toISOString()};if(existing)Object.assign(existing,row);else f.weightEntries.push(row);f.weightEntries.sort((a,b)=>a.date.localeCompare(b.date));g.current=weight;g.updatedAt=new Date().toISOString();normalizeFitnessGoal(g);g.status=fitnessGoalStatus(g);const ok=save(); if(!ok){toast('Could not save weight'); return;} closeModal(); render(); fitnessDashboard(id); toast('Weight saved');});
+  document.getElementById('fitnessMeasurementForm')?.addEventListener('submit',e=>{e.preventDefault();const fd=new FormData(e.target);f.measurements=Array.isArray(f.measurements)?f.measurements:[];f.measurements.push({id:uid('fm'),date:String(fd.get('date')),chest:Number(fd.get('chest'))||0,waist:Number(fd.get('waist'))||0,arms:Number(fd.get('arms'))||0,thighs:Number(fd.get('thighs'))||0,shoulders:Number(fd.get('shoulders'))||0,hips:0,updatedAt:new Date().toISOString()});g.updatedAt=new Date().toISOString();const ok=save(); if(!ok){toast('Could not save measurements'); return;} closeModal(); render(); fitnessDashboard(id); toast('Measurements saved');});
+  document.getElementById('fitnessWorkoutForm')?.addEventListener('submit',e=>{e.preventDefault();const fd=new FormData(e.target);f.workouts=Array.isArray(f.workouts)?f.workouts:[];f.workouts.push({id:uid('fwk'),date:String(fd.get('date')),exercise:String(fd.get('exercise')).trim(),weight:Number(fd.get('weight'))||0,sets:Number(fd.get('sets'))||0,reps:Number(fd.get('reps'))||0,notes:String(fd.get('notes')||''),updatedAt:new Date().toISOString()});g.updatedAt=new Date().toISOString();const ok=save(); if(!ok){toast('Could not save workout'); return;} closeModal(); render(); fitnessDashboard(id); toast('Workout logged');});
+}
+
 function renderGoals(filter = 'all') {
   const root = document.getElementById('goalCards'); if (!root) return; let list = [...state.goals];
   if (filter === 'active') list = list.filter(g => g.status !== 'paused' && goalPct(g) < 100);
   if (filter === 'ontrack') list = list.filter(g => g.status !== 'paused' && goalPct(g) >= 50 && goalPct(g) < 100);
   if (filter === 'completed') list = list.filter(g => goalPct(g) >= 100 || g.status === 'completed');
   if (filter === 'paused') list = list.filter(g => g.status === 'paused');
-  root.innerHTML = list.map(g => { const p = goalPct(g), left = daysLeft(g.date); return `<article class="goal-card ${g.status === 'paused' ? 'is-paused' : ''}" data-goal-id="${esc(g.id)}"><div class="goal-emoji">${esc(g.emoji || '')}</div><div class="goal-main"><strong>${esc(g.title)}</strong><span class="goal-category">${esc(g.category)}</span><small>Target: ${esc(g.unit)}${formatNumber(g.target)}</small></div><div class="goal-progress"><div class="goal-progress-top"><strong>${p}%</strong><button class="goal-update-btn" data-update-goal="${esc(g.id)}">Update</button></div><div class="progress-track"><i style="width:${p}%"></i></div><small>${esc(g.unit)}${formatNumber(g.current)} / ${esc(g.unit)}${formatNumber(g.target)}</small></div><div class="goal-date">${icon('calendar')}<span>${formatDate(g.date)}</span><b>${left >= 0 ? left + ' days left' : 'Past due'}</b></div><button class="dots-btn goal-dots" data-menu="goal:${esc(g.id)}" aria-label="Goal actions">${icon('dots')}</button></article>`; }).join('') || `<div class="empty-state"><strong>No goals here yet.</strong><span>Try another filter or add a new goal.</span></div>`;
+  root.innerHTML = list.map(g => { const p=goalPct(g), left=daysLeft(g.date); if(g.type==='fitness') return fitnessGoalCard(g,p,left); const chips=[g.components?.target?'Target':'',g.components?.milestones?`${(g.milestones||[]).filter(m=>m.completed).length}/${(g.milestones||[]).length} milestones`:'',g.components?.habits?`${(g.goalHabitIds||[]).length} habits`:'' ].filter(Boolean).map(x=>`<span>${esc(x)}</span>`).join('');
+    return `<article class="goal-card ${g.status === 'paused' ? 'is-paused' : ''}" data-goal-id="${esc(g.id)}"><div class="goal-emoji">${esc(g.emoji || '')}</div><div class="goal-main"><strong>${esc(g.title)}</strong><span class="goal-category">${esc(g.category)}</span>${chips?`<div class="goal-component-chips">${chips}</div>`:''}</div><div class="goal-progress"><div class="goal-progress-top"><strong>${p}%</strong><button class="goal-update-btn" data-update-goal="${esc(g.id)}">Update</button></div><div class="progress-track"><i style="width:${p}%"></i></div><small>${g.components?.target?`${esc(g.unit)}${formatNumber(g.current)} / ${esc(g.unit)}${formatNumber(g.target)}`:'Component progress'}</small></div><div class="goal-date">${icon('calendar')}<span>${formatDate(g.date)}</span><b>${left === null ? 'No deadline' : left >= 0 ? left + ' days left' : 'Past due'}</b></div><button class="dots-btn goal-dots" data-menu="goal:${esc(g.id)}" aria-label="Goal actions">${icon('dots')}</button></article>`; }).join('') || `<div class="empty-state"><strong>No goals here yet.</strong><span>Try another filter or add a new goal.</span></div>`;
   bindGoalInteractions(root);
 }
 function goalProgressForm(id) {
   const g = state.goals.find(x => x.id === id); if (!g) return;
+  if(g.type==='fitness'){ fitnessDashboard(id); return; }
   const unit = String(g.unit || ''), current = Math.max(0, Number(g.current) || 0), target = Math.max(1, Number(g.target) || 1);
   modal('Update goal progress', 'Change your progress without editing the goal itself.', `<form class="form" id="goalProgressForm"><div class="progress-edit-hero"><div class="goal-emoji">${esc(g.emoji || '🎯')}</div><div><strong>${esc(g.title)}</strong><small>${esc(g.category)} · Target ${esc(unit)}${formatNumber(target)}</small></div></div><div class="field"><label>Current progress <span>*</span></label><div class="goal-progress-input"><span>${esc(unit)}</span><input id="goalCurrentInput" name="current" type="number" min="0" max="${target}" step="any" required value="${current}"></div></div><div class="quick-progress"><span>Quick add</span><div>${[1,5,10].map(step=>`<button type="button" data-goal-step="${step}">+${step}</button>`).join('')}</div></div><div class="goal-live-preview"><span>New progress</span><strong id="goalProgressPreview">${goalPct(g)}%</strong><small id="goalProgressValue">${esc(unit)}${formatNumber(current)} / ${esc(unit)}${formatNumber(target)}</small></div><div class="form-actions"><button type="button" class="secondary-btn" data-modal-close>Cancel</button><button class="primary-btn">Update Goal →</button></div></form>`);
-  const form = document.getElementById('goalProgressForm'), input = document.getElementById('goalCurrentInput'), preview = document.getElementById('goalProgressPreview'), value = document.getElementById('goalProgressValue');
-  const updatePreview = () => { const n = Math.min(target, Math.max(0, Number(input.value) || 0)); preview.textContent = Math.min(100, Math.round(n / target * 100)) + '%'; value.textContent = `${unit}${formatNumber(n)} / ${unit}${formatNumber(target)}`; };
-  input.addEventListener('input', updatePreview);
-  form.querySelectorAll('[data-goal-step]').forEach(b => b.addEventListener('click', () => { input.value = Math.min(target, (Number(input.value) || 0) + Number(b.dataset.goalStep)); updatePreview(); }));
-  form.addEventListener('submit', e => { e.preventDefault(); const n = Math.min(target, Math.max(0, Number(input.value) || 0)); g.current = n; g.status = n >= target ? 'completed' : (g.status === 'paused' ? 'paused' : 'active'); g.updatedAt = new Date().toISOString(); save(); closeModal(); render(); toast(n >= target ? 'Goal completed ✓' : 'Goal progress updated'); });
+  const form=document.getElementById('goalProgressForm'),input=document.getElementById('goalCurrentInput'),preview=document.getElementById('goalProgressPreview'),value=document.getElementById('goalProgressValue'); const updatePreview=()=>{const n=Math.min(target,Math.max(0,Number(input.value)||0));preview.textContent=Math.min(100,Math.round(n/target*100))+'%';value.textContent=`${unit}${formatNumber(n)} / ${unit}${formatNumber(target)}`}; input.addEventListener('input',updatePreview); form.querySelectorAll('[data-goal-step]').forEach(b=>b.addEventListener('click',()=>{input.value=Math.min(target,(Number(input.value)||0)+Number(b.dataset.goalStep));updatePreview()})); form.addEventListener('submit',e=>{e.preventDefault();const n=Math.min(target,Math.max(0,Number(input.value)||0));g.current=n;g.status=n>=target?'completed':(g.status==='paused'?'paused':'active');g.updatedAt=new Date().toISOString();save();closeModal();render();toast(n>=target?'Goal completed ✓':'Goal progress updated')});
 }
-
 function calendarPage() { return shell('calendar', `<div class="page-title calendar-title"><h1>Calendar</h1><p>View your habits and goals activity.</p></div><div class="calendar-actions"><div class="segmented" id="calModes"><button class="active" data-mode="month">Month</button><button data-mode="week">Week</button><button data-mode="day">Day</button></div><button class="primary-btn" data-add-event>+ Add Event</button></div><section class="calendar-layout"><article class="panel calendar-panel"><div class="calendar-toolbar"><button class="month-selector" id="monthTitle">August 2026 ${icon('chevron')}</button><div class="calendar-nav"><button id="calPrev" aria-label="Previous month">${icon('left')}</button><button id="calToday">Today</button><button id="calNext" aria-label="Next month">${icon('right')}</button></div><div id="monthPicker" class="month-picker hidden"></div></div><div id="calendarBody"></div></article><aside class="calendar-side"><article class="panel day-summary" id="dayDetail"></article><article class="panel calendar-overview" id="reminderOverview"><div class="reminder-overview-head"><div><h2>Reminder Overview</h2><p>Events and habit reminders in one place.</p></div></div><div id="calendarReminderList"></div></article></aside></section>`); }
 
 function pctForDate(d) { return calendarPercentForDay(d); }
@@ -1967,7 +2147,7 @@ function bindHabitInteractions(root) {
   root.querySelectorAll('[data-menu]').forEach(b => b.addEventListener('click', e => { e.stopPropagation(); menuPopover('habit', b.dataset.menu.split(':')[1]); }));
 }
 function bindHabitPage() { document.querySelectorAll('[data-habit-filter]').forEach(b => b.addEventListener('click', () => { document.querySelectorAll('[data-habit-filter]').forEach(x => x.classList.toggle('active', x === b)); renderHabitCards(b.dataset.habitFilter, document.getElementById('habitSort').value); })); document.getElementById('habitSort').addEventListener('change', e => { const active = document.querySelector('[data-habit-filter].active')?.dataset.habitFilter || 'all'; renderHabitCards(active, e.target.value); }); }
-function bindGoalInteractions(root) { root.querySelectorAll('[data-menu]').forEach(b => b.addEventListener('click', e => { e.stopPropagation(); menuPopover('goal', b.dataset.menu.split(':')[1]); })); root.querySelectorAll('[data-update-goal]').forEach(b => b.addEventListener('click', e => { e.stopPropagation(); goalProgressForm(b.dataset.updateGoal); })); }
+function bindGoalInteractions(root) { root.querySelectorAll('[data-menu]').forEach(b => b.addEventListener('click', e => { e.stopPropagation(); menuPopover('goal', b.dataset.menu.split(':')[1]); })); root.querySelectorAll('[data-update-goal]').forEach(b => b.addEventListener('click', e => { e.stopPropagation(); goalProgressForm(b.dataset.updateGoal); })); root.querySelectorAll('[data-fitness-goal]').forEach(b => b.addEventListener('click', e => { e.stopPropagation(); fitnessDashboard(b.dataset.fitnessGoal); })); }
 function bindGoalPage() { document.querySelectorAll('[data-goal-filter]').forEach(b => b.addEventListener('click', () => { const f = b.dataset.goalFilter; if (!f) return; document.querySelectorAll('[data-goal-filter]').forEach(x => x.classList.toggle('active', x === b)); renderGoals(f); })); }
 
 
@@ -2019,14 +2199,12 @@ function weekView(cursor) {
   return out + '</div>';
 }
 
-function storageModeLabel(mode) {
-  return mode === 'cloud' || mode === 'both' || mode === 'drive' ? 'This device + Cloud sync' : 'This device';
-}
+function storageModeLabel(mode) { return 'This device + Cloud sync'; }
 function storageIsConfigured() { return !!currentAuthUser && (state.settings?.storage?.setupCompleted !== false); }
 function accountStorageMode() {
-  const raw = currentAuthUser?.user_metadata?.habitly_storage_mode || state.settings?.storage?.mode || 'cloud';
-  if (raw === 'drive' || raw === 'both' || raw === 'cloud') return 'cloud';
-  return 'local';
+  // Supabase is the authoritative cross-device source for authenticated users.
+  // Google Drive is backup/restore only; a local-only account mode is no longer exposed.
+  return 'cloud';
 }
 function storageMode() { return accountStorageMode(); }
 function backupStatusText(d) {
@@ -2042,19 +2220,13 @@ function backupStatusText(d) {
 }
 function showStorageOnboarding() {
   if (!currentAuthUser || storageIsConfigured() || storageOnboardingBusy) return;
-  modal('Choose your storage', 'Habitly is local-first. Cloud sync keeps your data consistent across devices; Google Drive is an optional backup.', `<div class="storage-choice-grid">
-    <button class="storage-choice" type="button" data-storage-choice="local"><span class="storage-choice-icon">${icon('desktop')}</span><span><b>This device</b><small>Keep Habitly data only in this browser. No cross-device sync.</small></span><strong>Local only</strong></button>
-    <button class="storage-choice" type="button" data-storage-choice="cloud"><span class="storage-choice-icon">${icon('cloud')}</span><span><b>This device + Cloud sync</b><small>Use Supabase as the single cross-device data source. Google Drive can be connected later as backup.</small></span><strong>Recommended</strong></button>
+  modal('Cloud sync', 'Habitly uses Supabase as the authoritative cross-device data source. Google Drive is optional and is used only for backup/restore.', `<div class="storage-choice-grid">
+    <button class="storage-choice selected" type="button" data-storage-choice="cloud"><span class="storage-choice-icon">${icon('cloud')}</span><span><b>This device + Cloud sync</b><small>Your data is stored locally for fast UI updates and synchronized through your authenticated Supabase account. Google Drive remains an optional backup.</small></span><strong>Active</strong></button>
   </div>`);
-  document.querySelectorAll('[data-storage-choice]').forEach(b => b.addEventListener('click', () => chooseStorage(b.dataset.storageChoice)));
+  document.querySelectorAll('[data-storage-choice]').forEach(b => b.addEventListener('click', () => chooseStorage('cloud')));
 }
 async function chooseStorage(mode) {
-  if (storageOnboardingBusy) return;
-  if (mode === 'local') {
-    state.settings.storage = { mode: 'local', setupCompleted: true };
-    await persistStorageChoice('local');
-    save(); closeModal(); render(); toast('Storage set to This device'); return;
-  }
+  if (storageOnboardingBusy || mode !== 'cloud') return;
   if (mode === 'cloud') {
     state.settings.storage = { mode: 'cloud', setupCompleted: true };
     await persistStorageChoice('cloud');
@@ -2094,32 +2266,23 @@ async function completeStorageSetup(mode) {
   render();
 }
 function changeStorageMode() {
-  const current = storageMode();
-  modal('Change storage', `Current storage: ${storageModeLabel(current)}. Choose a new storage method.`, `<div class="storage-choice-grid compact">
-    <button class="storage-choice ${current === 'local' ? 'selected' : ''}" type="button" data-change-storage="local"><span class="storage-choice-icon">${icon('desktop')}</span><span><b>This device</b><small>Keep your local Habitly data in this browser.</small></span></button>
-    <button class="storage-choice ${current === 'cloud' ? 'selected' : ''}" type="button" data-change-storage="cloud"><span class="storage-choice-icon">${icon('cloud')}</span><span><b>This device + Cloud sync</b><small>Supabase is the active cross-device data source. Google Drive remains backup only.</small></span></button>
+  modal('Cloud sync', 'Supabase is the active cross-device data source for authenticated Habitly accounts. Google Drive is available only as an optional backup/restore layer.', `<div class="storage-choice-grid compact">
+    <button class="storage-choice selected" type="button" data-change-storage="cloud"><span class="storage-choice-icon">${icon('cloud')}</span><span><b>This device + Cloud sync</b><small>Local state remains responsive, while Supabase provides the authoritative cross-device copy.</small></span><strong>Active</strong></button>
   </div>`);
   document.querySelectorAll('[data-change-storage]').forEach(b => b.addEventListener('click', async () => {
-    const m=b.dataset.changeStorage;
-    if (m === 'local') {
-      state.settings.storage={mode:'local',setupCompleted:true};
-      await persistStorageChoice('local');
-      stopCloudSync();
-      save({skipDrive:true}); closeModal(); render(); toast('Storage changed to This device');
-    } else {
-      state.settings.storage={mode:'cloud',setupCompleted:true};
-      await persistStorageChoice('cloud');
-      await initializeCloudSync(); subscribeCloudRealtime(); startCloudPolling();
-      closeModal(); render(); toast('Cloud sync enabled');
-    }
+    await persistStorageChoice('cloud');
+    state.settings.storage = { mode: 'cloud', setupCompleted: true };
+    await initializeCloudSync(); subscribeCloudRealtime(); startCloudPolling();
+    closeModal(); render(); toast('Cloud sync is active');
   }));
 }
+
 function settingsPage() {
   const s = state.settings || defaultState.settings, p = state.profile || defaultState.profile;
   return shell('settings', `<div class="settings-page-title"><div><span class="eyebrow">HABITLY SETTINGS</span><h1>Settings</h1><p>Manage your account and preferences.</p></div></div>
  <section class="settings-layout">
   <aside class="settings-nav" aria-label="Settings navigation">
-   ${[['account', 'Account', 'user'], ['notifications', 'Notifications', 'bell'], ['habits', 'Habit Preferences', 'target'], ['security', 'Privacy & Security', 'shield'], ['data', 'Data & Backup', 'database'], ['about', 'About Habitly', 'info']].map(([k, t, i], idx) => `<button class="settings-tab ${idx === 0 ? 'active' : ''}" data-settings-tab="${k}"><span class="settings-tab-icon">${icon(i)}</span><span>${t}</span></button>`).join('')}
+   ${[['account', 'Account', 'user'], ['notifications', 'Notifications', 'bell'], ['habits', 'Habit Preferences', 'target'], ['fitness', 'Fitness Tracking', 'target'], ['security', 'Privacy & Security', 'shield'], ['data', 'Data & Backup', 'database'], ['about', 'About Habitly', 'info']].map(([k, t, i], idx) => `<button class="settings-tab ${idx === 0 ? 'active' : ''}" data-settings-tab="${k}"><span class="settings-tab-icon">${icon(i)}</span><span>${t}</span></button>`).join('')}
   </aside>
   <div class="settings-content" id="settingsContent"></div>
  </section>`);
@@ -2129,8 +2292,9 @@ function settingsSection(key) {
   if (key === 'account') return `<article class="settings-card settings-account"><div class="settings-card-head"><div class="settings-heading-icon purple">${icon('user')}</div><div><h2>Account</h2><p>Update your personal information and profile picture.</p></div></div><form id="profileForm" class="settings-form"><div class="profile-editor"><div class="profile-avatar-wrap"><div class="profile-avatar" id="profileAvatar">${p.avatar ? `<img src="${esc(p.avatar)}" alt="Profile picture">` : `<span class="avatar-initials">${esc((p.name || 'Prem Kumar').trim().split(/\s+/).map(x => x[0]).slice(0, 2).join('').toUpperCase() || 'PK')}</span>`}</div><label class="avatar-upload" title="Change profile picture">${icon('upload')}<input id="avatarInput" type="file" accept="image/png,image/jpeg,image/webp"></label><small>PNG, JPG or WebP · max 10 MB · crop supported</small></div><div class="settings-fields"><div class="field"><label>Full name</label><input name="name" value="${esc(p.name)}" required></div><div class="field"><label>Email address</label><input name="email" type="email" value="${esc(p.email)}" required></div></div></div><div class="settings-save-row"><button class="primary-btn">Save changes ${icon('arrow')}</button></div></form></article>
  <article class="settings-card install-app-card"><div class="settings-card-head"><div class="settings-heading-icon purple">${icon('download')}</div><div><h2>Install Habitly</h2><p>Use Habitly like an app on your phone with a home-screen icon and standalone experience.</p></div></div><div id="installAppContent"></div></article>
  <div class="settings-two-col"><article class="settings-card"><div class="settings-card-head compact"><div class="settings-heading-icon green">${icon('shield')}</div><div><h2>Account status</h2><p>Your Habitly profile is ready to use.</p></div><span class="status-pill">Good</span></div><div class="info-list"><div><span>${icon('check')}Profile information</span><b>Complete</b></div><div><span>${icon('database')}Local data</span><b>Protected</b></div></div></article><article class="settings-card about-mini"><div class="settings-brand-mark">${logo()}</div><h2>Habitly by PRK</h2><p>Build better habits. Achieve your goals. One consistent day at a time.</p></article></div>`;
-  if (key === 'notifications') return `<article class="settings-card"><div class="settings-card-head"><div class="settings-heading-icon purple">${icon('bell')}</div><div><h2>Notifications</h2><p>Control habit and event reminders independently and choose their defaults.</p></div></div><div class="settings-options">${[['habitReminders', 'Habit reminders', 'Allow scheduled reminders for your habits.', 'bell'], ['eventReminders', 'Event reminders', 'Allow scheduled reminders for calendar events.', 'calendar'], ['motivational', 'Motivational messages', 'Receive helpful daily motivation.', 'star'], ['weekly', 'Weekly summary', 'Get a weekly progress summary.', 'chart'], ['goal', 'Goal reminders', 'Stay on track with important goals.', 'trophy']].map(([k, t, d, i]) => `<label class="settings-option"><span class="option-icon">${icon(i === 'star' ? 'plusCircle' : i)}</span><span><b>${t}</b><small>${d}</small></span><input type="checkbox" data-notify="${k}" ${s.notifications[k] !== false ? 'checked' : ''}><i class="toggle"></i></label>`).join('')}</div><div class="settings-subsection"><div class="settings-subhead"><b>Reminder defaults</b><small>Used when you create a new reminder. Existing reminders are not changed.</small></div><div class="settings-preference-grid"><div class="field"><label>Default event reminder</label><select id="prefDefaultEventOffset">${[[0,'At event time'],[5,'5 minutes before'],[10,'10 minutes before'],[15,'15 minutes before'],[30,'30 minutes before'],[60,'1 hour before'],[1440,'1 day before']].map(([v,t]) => `<option value="${v}" ${Number(s.notifications.defaultEventOffset)===v?'selected':''}>${t}</option>`).join('')}</select></div><div class="field"><label>Default habit reminder time</label><input id="prefDefaultHabitTime" type="time" step="1" value="${esc(parseTime24(s.notifications.defaultHabitTime) || '20:00:00')}"></div></div><div class="field"><label>Default habit reminder days</label><div class="reminder-day-picker settings-day-picker">${[[1,'Mon'],[2,'Tue'],[3,'Wed'],[4,'Thu'],[5,'Fri'],[6,'Sat'],[0,'Sun']].map(([v,label]) => `<label class="reminder-day"><input type="checkbox" name="defaultHabitDays" value="${v}" ${normalizeReminderDays(s.notifications.defaultHabitDays).includes(v)?'checked':''}><span>${label}</span></label>`).join('')}</div></div></div><div class="notification-permission-card"><div><b>Browser notification permission</b><small>${typeof Notification === 'undefined' ? 'Not supported by this browser.' : Notification.permission === 'granted' ? 'Allowed — Habitly can show browser notifications.' : Notification.permission === 'denied' ? 'Blocked — enable notifications in browser settings.' : 'Not enabled yet.'}</small></div><button type="button" class="secondary-btn" id="enableBrowserNotifications">${typeof Notification !== 'undefined' && Notification.permission === 'granted' ? 'Notifications enabled' : 'Enable notifications'}</button></div><div class="settings-note">Habitly uses browser notifications and the reminder service for scheduled alerts. Keep browser notifications allowed if you want reminder alerts while Habitly is open or running in the background. Event reminders default to the event time for new events, and habit reminders default to 8:00 PM every day.</div></article>`;
+  if (key === 'notifications') return `<article class="settings-card"><div class="settings-card-head"><div class="settings-heading-icon purple">${icon('bell')}</div><div><h2>Notifications</h2><p>Control habit and event reminders independently. Events always notify at their scheduled time.</p></div></div><div class="settings-options">${[['habitReminders', 'Habit reminders', 'Allow scheduled reminders for your habits.', 'bell'], ['eventReminders', 'Event reminders', 'Allow scheduled reminders for calendar events.', 'calendar'], ['motivational', 'Motivational messages', 'Receive helpful daily motivation.', 'star'], ['weekly', 'Weekly summary', 'Get a weekly progress summary.', 'chart'], ['goal', 'Goal reminders', 'Stay on track with important goals.', 'trophy']].map(([k, t, d, i]) => `<label class="settings-option"><span class="option-icon">${icon(i === 'star' ? 'plusCircle' : i)}</span><span><b>${t}</b><small>${d}</small></span><input type="checkbox" data-notify="${k}" ${s.notifications[k] !== false ? 'checked' : ''}><i class="toggle"></i></label>`).join('')}</div><div class="settings-subsection"><div class="settings-subhead"><b>Habit reminder defaults</b><small>These defaults apply when you create a new habit reminder.</small></div><div class="settings-preference-grid"><div class="field"><label>Default habit reminder time</label><input id="prefDefaultHabitTime" class="time-text-input" type="text" value="${esc(formatTimeShort(s.notifications.defaultHabitTime || '20:00:00'))}" placeholder="${userTimeFormat()==='12h'?'8:00 PM':'20:00'}" autocomplete="off"></div></div><div class="field"><label>Default habit reminder days</label><div class="reminder-day-picker settings-day-picker">${[[1,'Mon'],[2,'Tue'],[3,'Wed'],[4,'Thu'],[5,'Fri'],[6,'Sat'],[0,'Sun']].map(([v,label]) => `<label class="reminder-day"><input type="checkbox" name="defaultHabitDays" value="${v}" ${normalizeReminderDays(s.notifications.defaultHabitDays).includes(v)?'checked':''}><span>${label}</span></label>`).join('')}</div></div></div><div class="notification-permission-card"><div><b>Browser notification permission</b><small>${typeof Notification === 'undefined' ? 'Not supported by this browser.' : Notification.permission === 'granted' ? 'Allowed — Habitly can show browser notifications.' : Notification.permission === 'denied' ? 'Blocked — enable notifications in browser settings.' : 'Not enabled yet.'}</small></div><button type="button" class="secondary-btn" id="enableBrowserNotifications">${typeof Notification !== 'undefined' && Notification.permission === 'granted' ? 'Notifications enabled' : 'Enable notifications'}</button></div><div class="settings-note">Habitly uses browser notifications and the reminder service for scheduled alerts. Keep browser notifications allowed if you want reminder alerts while Habitly is open or running in the background. Event reminders default to the event time for new events, and habit reminders default to 8:00 PM every day.</div></article>`;
   if (key === 'habits') return `<article class="settings-card"><div class="settings-card-head"><div class="settings-heading-icon purple">${icon('target')}</div><div><h2>Habit Preferences</h2><p>Customize how your habits are displayed and tracked.</p></div></div><div class="settings-preference-grid"><div class="field"><label>Time format</label><select id="prefTimeFormat"><option value="12h" ${s.timeFormat !== '24h' ? 'selected' : ''}>12-hour (AM/PM)</option><option value="24h" ${s.timeFormat === '24h' ? 'selected' : ''}>24-hour</option></select></div><div class="field"><label>Default habit view</label><select id="prefDefaultView"><option>All Habits</option><option>Active</option><option>Completed</option><option>Paused</option></select></div><div class="field"><label>Week starts on</label><select id="prefWeekStart"><option>Monday</option><option>Sunday</option></select></div></div><div class="settings-options compact-options"><label class="settings-option"><span class="option-icon">${icon('check')}</span><span><b>Auto-complete at target</b><small>Mark quantity habits complete when they reach their target.</small></span><input type="checkbox" id="prefAuto" ${s.habits.autoComplete ? 'checked' : ''}><i class="toggle"></i></label><label class="settings-option"><span class="option-icon">${icon('pause')}</span><span><b>Keep streaks during pauses</b><small>Paused habits do not break an existing streak.</small></span><input type="checkbox" id="prefStreak" ${s.habits.keepStreak ? 'checked' : ''}><i class="toggle"></i></label><label class="settings-option"><span class="option-icon">${icon('plus')}</span><span><b>Show quick quantity controls</b><small>Keep plus and minus controls visible on habit cards.</small></span><input type="checkbox" id="prefQuick" ${s.habits.quickQuantity ? 'checked' : ''}><i class="toggle"></i></label></div></article>`;
+  if (key === 'fitness') { const f=s.fitness||defaultState.settings.fitness; return `<article class="settings-card fitness-settings-card"><div class="settings-card-head"><div class="settings-heading-icon purple">🏋️</div><div><h2>Fitness Tracking</h2><p>Choose which optional fitness sections appear inside Fitness Goals.</p></div></div><div class="fitness-settings-list"><label class="fitness-setting-row"><span class="fitness-setting-icon">🏋️</span><span class="fitness-setting-copy"><b>Workout & strength logging</b><small>Track exercises, weight, sets, reps and personal records.</small></span><input type="checkbox" id="prefWorkoutLogging" ${f.workoutLogging?'checked':''}><span class="fitness-setting-toggle" aria-hidden="true"></span></label><label class="fitness-setting-row"><span class="fitness-setting-icon">📏</span><span class="fitness-setting-copy"><b>Body measurements</b><small>Track optional chest, waist, arms, thighs and shoulder measurements.</small></span><input type="checkbox" id="prefBodyMeasurements" ${f.bodyMeasurements?'checked':''}><span class="fitness-setting-toggle" aria-hidden="true"></span></label></div><div class="settings-note">Weight tracking, averages, progress and the main Fitness Dashboard are always available. These advanced sections are off by default.</div></article>`; }
   if (key === 'security') return `<article class="settings-card"><div class="settings-card-head"><div class="settings-heading-icon blue">${icon('shield')}</div><div><h2>Privacy & Security</h2><p>Protect your account and control access to your local Habitly data.</p></div></div><div class="security-status"><span class="security-icon">${icon('shield')}</span><div><b>Local data protection</b><small>Habitly keeps a local working copy in this browser and, for cloud-enabled accounts, synchronizes through the authenticated Supabase data layer.</small></div><span class="status-pill">Active</span></div><div class="security-grid"><button class="security-action" data-security="sessions"><span>${icon('desktop')}</span><b>Active session</b><small>This browser</small></button><button class="security-action" data-security="clear"><span>${icon('trash')}</span><b>Clear local data</b><small>Requires confirmation</small></button></div><div class="settings-note">There is no server-side login or password system in this frontend, so password/2FA controls are intentionally not presented as fake functionality.</div></article>`;
   if (key === 'data') {
     const d = (state.settings?.drive) || {};
@@ -2139,17 +2303,17 @@ function settingsSection(key) {
     const driveSelected = mode === 'cloud';
     const connected = !!d.connected && driveSelected;
     const status = connected ? backupStatusText(d) : '';
-    return `<article class="settings-card"><div class="settings-card-head"><div class="settings-heading-icon purple">${icon('database')}</div><div><h2>Data & Backup</h2><p>Habitly works locally first. Cloud sync keeps every device consistent; Google Drive is an optional backup and restore layer.</p></div></div>
-      <div class="storage-current"><div><span class="eyebrow">CURRENT STORAGE</span><strong>This device + Cloud sync</strong><small>Habitly is local-first and uses Supabase as the single cross-device data source. Google Drive is backup/restore only.</small></div></div>
+    return `<article class="settings-card"><div class="settings-card-head"><div class="settings-heading-icon purple">${icon('database')}</div><div><h2>Data & Backup</h2><p>Habitly keeps a local working copy for responsiveness while Supabase remains the authoritative cross-device data source. Google Drive is an optional backup and restore layer.</p></div></div>
+      <div class="storage-current"><div><span class="eyebrow">CURRENT STORAGE</span><strong>This device + Cloud sync</strong><small>Supabase is the single authoritative cross-device data source. Google Drive is backup/restore only.</small></div></div>
        ${mode === 'cloud' ? `<div class="backup-status-line ${cloudSyncError ? 'waiting' : 'ready'}">${icon(cloudSyncError ? 'info' : 'check')}<span>${esc(cloudStatusText())}</span></div>` : ''}
       <div class="backup-actions"><button class="backup-card" id="exportBackup"><span>${icon('download')}</span><b>Export backup</b><small>Download your complete Habitly data as JSON.</small></button><label class="backup-card"><span>${icon('upload')}</span><b>Import backup</b><small>Restore a Habitly JSON backup from this device.</small><input id="importBackup" type="file" accept="application/json,.json"></label></div>
-      ${driveSelected ? `<div class="drive-backup-card"><div class="drive-head"><div class="drive-icon">${icon('cloud')}</div><div><h3>Google Drive Backup</h3><p>Habitly keeps one rolling backup file in your Drive. It updates instead of creating daily files.</p></div><span class="drive-status ${connected ? 'connected' : ''}">${connected ? 'Connected' : 'Not connected'}</span></div><div class="drive-copy"><div><b>Habitly_Backup.json</b><small>${connected ? (d.email ? `Google account: ${esc(d.email)}` : 'Connected to Google Drive') : 'Connect Google Drive to enable cloud backup.'}</small></div><div class="drive-last"><span>Last synced</span><strong>${connected && d.lastBackupAt ? formatBackupTime(d.lastBackupAt) : 'Not backed up yet'}</strong></div></div>${connected ? `<div class="backup-status-line ${d.lastBackupDate === todayISO() ? 'ready' : 'waiting'}">${icon(d.lastBackupDate === todayISO() ? 'check' : 'info')}<span>${esc(status)}</span></div>` : ''}<div class="drive-actions"><button class="primary-btn" id="driveConnect">${icon(connected ? 'refresh' : 'cloud')}${connected ? 'Reconnect Google Drive' : 'Connect Google Drive'}</button>${connected ? `<button class="secondary-btn" id="driveBackupNow">${icon('cloud')} Back up now</button><button class="secondary-btn" id="driveRestore">${icon('download')} Restore backup</button><button class="danger-btn" id="driveDisconnect">${icon('trash')} Disconnect Drive</button>` : ''}</div>${connected ? `<label class="drive-auto"><span><b>Automatic backup · ${d.autoDaily !== false ? 'On' : 'Off'}</b><small>When enabled, Habitly backs up the latest acknowledged cloud state to the same Google Drive file. Drive is never used as the active sync source.</small></span><input type="checkbox" id="driveAutoDaily" ${d.autoDaily !== false ? 'checked' : ''}><i class="toggle"></i></label>` : ''}<div class="settings-note drive-note">${connected ? 'Only one cloud backup is maintained. No separate daily files are created. Your profile photo is not included in the cloud JSON backup.' : 'Connect Google Drive to enable cloud storage and backup controls.'}</div></div>` : `<div class="settings-note">Google Drive is optional. Connect it here when you want a durable backup/restore copy of your cloud-synchronized data.</div>`}
+      ${driveSelected ? `<div class="drive-backup-card"><div class="drive-head"><div class="drive-icon">${icon('cloud')}</div><div><h3>Google Drive Backup</h3><p>Habitly keeps one rolling backup file in your Drive. It updates instead of creating daily files.</p></div><span class="drive-status ${connected ? 'connected' : ''}">${connected ? 'Connected' : 'Not connected'}</span></div><div class="drive-copy"><div><b>Habitly_Backup.json</b><small>${connected ? (d.email ? `Google account: ${esc(d.email)}` : 'Connected to Google Drive') : 'Connect Google Drive to enable cloud backup.'}</small></div><div class="drive-last"><span>Last synced</span><strong>${connected && d.lastBackupAt ? formatBackupTime(d.lastBackupAt) : 'Not backed up yet'}</strong></div></div>${connected ? `<div class="backup-status-line ${d.lastBackupDate === todayISO() ? 'ready' : 'waiting'}">${icon(d.lastBackupDate === todayISO() ? 'check' : 'info')}<span>${esc(status)}</span></div>` : ''}<div class="drive-actions"><button class="primary-btn" id="driveConnect">${icon(connected ? 'refresh' : 'cloud')}${connected ? 'Reconnect Google Drive' : 'Connect Google Drive'}</button>${connected ? `<button class="secondary-btn" id="driveBackupNow">${icon('cloud')} Back up now</button><button class="secondary-btn" id="driveRestore">${icon('download')} Restore backup</button><button class="danger-btn" id="driveDisconnect">${icon('trash')} Disconnect Drive</button>` : ''}</div>${connected ? `<label class="drive-auto"><span><b>Automatic backup · ${d.autoDaily === true ? 'On' : 'Off'}</b><small>When enabled, Habitly backs up the latest acknowledged cloud state to the same Google Drive file. Drive is never used as the active sync source.</small></span><input type="checkbox" id="driveAutoDaily" ${d.autoDaily === true ? 'checked' : ''}><i class="toggle"></i></label>` : ''}<div class="settings-note drive-note">${connected ? 'Only one cloud backup is maintained. No separate daily files are created. Your profile photo is not included in the cloud JSON backup.' : 'Connect Google Drive only when you want an optional backup/restore copy of your cloud data.'}</div></div>` : `<div class="settings-note">Google Drive is optional. Connect it here when you want a durable backup/restore copy of your cloud-synchronized data.</div>`}
     </article>`;
   }
   return `<article class="settings-card about-settings"><div class="about-hero"><div class="about-logo"><img src="${AS}Habitly Leaf Transparent.png" alt="Habitly leaf logo"></div><div><span class="eyebrow">HABITLY BY PRK</span><h2>About Habitly</h2><p>Your personal habit and goal tracking companion.</p></div></div><div class="about-copy"><h3>About me</h3><p>I'm Prem Kumar, an Integrated B.Tech–M.Tech Cyber Security student focused on cloud security, secure software and practical cybersecurity engineering. I build hands-on projects to strengthen my skills in secure systems, automation and real-world application development.</p><h3>Why I created Habitly</h3><p>I created Habitly as a practical productivity application that brings habits and long-term goals into one focused workspace. It makes progress visible, measurable and editable while giving me a real-world project for building responsive interfaces, state management, persistence and user-focused software.</p></div><div class="about-links"><a href="https://github.com/prem-cybersecurity" target="_blank" rel="noopener noreferrer" aria-label="Open GitHub">${icon('github')}<span>GitHub</span></a><a href="https://premkumar-portfolio-kohl.vercel.app/" target="_blank" rel="noopener noreferrer" aria-label="Open portfolio"><span>Portfolio</span>${icon('external')}</a><a class="linkedin-link" href="https://www.linkedin.com/in/premkumar-cybersecurity" target="_blank" rel="noopener noreferrer" aria-label="Open LinkedIn">${icon('linkedin')}<span>LinkedIn</span></a></div><small class="version-line">Habitly by PRK · Version ${APP_VERSION}</small></article>`;
 }
 function driveSettings() { if (!state.settings) state.settings = clone(defaultState.settings); if (!state.settings.drive) state.settings.drive = clone(defaultState.settings.drive); return state.settings.drive; }
-function formatBackupTime(v) { try { return new Date(v).toLocaleString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: userTimeFormat() !== '24h' }); } catch (e) { return 'Not backed up yet'; } }
+function formatBackupTime(v) { try { return new Date(v).toLocaleString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: userTimeFormat() !== '24h' }); } catch (e) { return 'Not backed up yet'; } }
 function driveClientReady() { return typeof google !== 'undefined' && google.accounts && google.accounts.oauth2; }
 function ensureDriveClient() {
   if (!driveClientReady()) { toast('Google sign-in is still loading. Try again in a moment.'); return false; }
@@ -2494,7 +2658,7 @@ async function finishDriveConnection() {
       return;
     }
     render(); toast('Google Drive connected');
-    if (d.autoDaily !== false && d.lastBackupDate !== todayISO()) setTimeout(() => uploadDriveBackup().then(() => { if (currentRoute() === 'settings') render(); }), 250);
+    if (d.autoDaily === true && d.lastBackupDate !== todayISO()) setTimeout(() => uploadDriveBackup().then(() => { if (currentRoute() === 'settings') render(); }), 250);
   } catch (e) {
     console.error(e);
     if (storageOnboardingMode) { storageOnboardingBusy = false; toast('Could not finish Google Drive setup. Please try again.'); }
@@ -2569,6 +2733,8 @@ function validateBackupEnvelope(incoming) {
   return normalizeState(mergeState(raw, { preserveMutations: false }));
 }
 async function syncDriveOnLogin(options = {}) {
+  // Google Drive is never part of login hydration. Supabase Cloud is the sole automatic source of truth.
+  if (cloudStorageSelected()) return false;
   if (!currentAuthUser || driveLoginSyncBusy || (!options.refresh && driveLoginSyncedUserId === currentAuthUser.id)) return;
   if (cloudStorageSelected() && cloudSyncAvailable && cloudRevision > 0) {
     driveLoginSyncPending = false;
@@ -2730,8 +2896,8 @@ async function bindDriveSettings(root) {
   });
   root.querySelector('#driveRestore')?.addEventListener('click', restoreDriveBackup);
   root.querySelector('#driveDisconnect')?.addEventListener('click', () => disconnectDrive());
-  root.querySelector('#driveAutoDaily')?.addEventListener('change', e => { d.autoDaily = e.target.checked; save(); if (currentRoute() === 'settings') render(); toast(d.autoDaily ? 'Automatic Google Drive backup enabled' : 'Automatic Google Drive backup disabled'); });
-  if (d.connected && d.autoDaily !== false && d.lastBackupDate !== todayISO()) {
+  root.querySelector('#driveAutoDaily')?.addEventListener('change', e => { d.autoDaily = e.target.checked; d.driveOptInVersion = 1; save(); if (currentRoute() === 'settings') render(); toast(d.autoDaily ? 'Automatic Google Drive backup enabled' : 'Automatic Google Drive backup disabled'); });
+  if (d.connected && d.autoDaily === true && d.lastBackupDate !== todayISO()) {
     if (googleAccessToken && Date.now() < googleTokenExpiresAt - 60000) setTimeout(() => uploadDriveBackup({ silent: true }), 250);
     else if (ensureDriveClient()) requestDriveToken('', { silent: true }).catch(() => {});
   }
@@ -2800,7 +2966,7 @@ function renderCropper() {
 function initSettings() {
   const root = document.querySelector('.page-settings'); if (!root) return;
   const content = root.querySelector('#settingsContent');
-  function show(key) { root.querySelectorAll('.settings-nav [data-settings-tab]').forEach(x => x.classList.toggle('active', x.dataset.settingsTab === key)); content.innerHTML = settingsSection(key); bindSection(key); }
+  function show(key) { window.__habitlyActiveSettingsSection = key; root.querySelectorAll('.settings-nav [data-settings-tab]').forEach(x => x.classList.toggle('active', x.dataset.settingsTab === key)); content.innerHTML = settingsSection(key); bindSection(key); }
   function bindSection(key) {
     if (key === 'account') {
       const input = root.querySelector('#avatarInput'); input?.addEventListener('change', e => { const f = e.target.files?.[0]; if (!f) return; if (!/^image\/(png|jpeg|webp)$/i.test(f.type)) { toast('Please choose a PNG, JPG or WebP image'); e.target.value = ''; return; } if (f.size > 10 * 1024 * 1024) { toast('Profile picture must be 10 MB or smaller'); e.target.value = ''; return; } openCropper(f, result => { state.profile.avatar = result; root.querySelector('#profileAvatar').innerHTML = `<img src="${esc(result)}" alt="Profile picture">`; }); e.target.value = ''; });
@@ -2809,25 +2975,25 @@ function initSettings() {
     }
     if (key === 'notifications') {
       root.querySelectorAll('[data-notify]').forEach(i => i.addEventListener('change', () => { if (!state.settings) state.settings = clone(defaultState.settings); state.settings.notifications = normalizeNotificationSettings(state.settings.notifications); state.settings.notifications[i.dataset.notify] = i.checked; state.settings.notifications.daily = state.settings.notifications.habitReminders; save(); refreshReminderUi(); toast(i.dataset.notify === 'habitReminders' ? (i.checked ? 'Habit reminders enabled' : 'Habit reminders turned off') : i.dataset.notify === 'eventReminders' ? (i.checked ? 'Event reminders enabled' : 'Event reminders turned off') : 'Notification preference saved'); }));
-      root.querySelector('#prefDefaultEventOffset')?.addEventListener('change', e => { s.notifications.defaultEventOffset = Number(e.target.value); save(); toast('Default event reminder updated'); });
-      root.querySelector('#prefDefaultHabitTime')?.addEventListener('change', e => { s.notifications.defaultHabitTime = parseTime24(e.target.value) || '20:00:00'; save(); toast('Default habit reminder time updated'); });
+      root.querySelector('#prefDefaultHabitTime')?.addEventListener('change', e => { const parsed=parseTime24(e.target.value); if(!parsed){ e.target.value=formatTimeShort(s.notifications.defaultHabitTime||'20:00:00'); toast('Enter a valid time'); return; } s.notifications.defaultHabitTime=parsed; e.target.value=formatTimeShort(parsed); save(); toast('Default habit reminder time updated'); });
       root.querySelectorAll('input[name="defaultHabitDays"]').forEach(i => i.addEventListener('change', () => { const checked = [...root.querySelectorAll('input[name="defaultHabitDays"]:checked')].map(x => Number(x.value)); if (!checked.length) { i.checked = true; toast('Select at least one day'); return; } s.notifications.defaultHabitDays = normalizeReminderDays(checked); save(); toast('Default reminder days updated'); }));
       root.querySelector('#enableBrowserNotifications')?.addEventListener('click', enableNotifications);
     }
     if (key === 'habits') {
-      const s = safesettings(); const v = s.habits; root.querySelector('#prefTimeFormat').value = s.timeFormat || '12h'; root.querySelector('#prefTimeFormat').addEventListener('change', e => { s.timeFormat = e.target.value === '24h' ? '24h' : '12h'; save(); render(); }); root.querySelector('#prefDefaultView').value = v.defaultView; root.querySelector('#prefWeekStart').value = v.weekStarts;
+      const s = safesettings(); const v = s.habits; root.querySelector('#prefTimeFormat').value = s.timeFormat || '12h'; root.querySelector('#prefTimeFormat').addEventListener('change', e => { s.timeFormat = e.target.value === '24h' ? '24h' : '12h'; save(); show('habits'); }); root.querySelector('#prefDefaultView').value = v.defaultView; root.querySelector('#prefWeekStart').value = v.weekStarts;
       root.querySelector('#prefDefaultView').addEventListener('change', e => { v.defaultView = e.target.value; save(); }); root.querySelector('#prefWeekStart').addEventListener('change', e => { v.weekStarts = e.target.value; save(); });
       [['#prefAuto', 'autoComplete'], ['#prefStreak', 'keepStreak'], ['#prefQuick', 'quickQuantity']].forEach(([sel, k]) => root.querySelector(sel).addEventListener('change', e => { v[k] = e.target.checked; save(); }));
     }
+    if (key === 'fitness') { const f=safesettings().fitness; root.querySelector('#prefWorkoutLogging')?.addEventListener('change',e=>{f.workoutLogging=e.target.checked;save();show('fitness');toast(e.target.checked?'Workout logging enabled':'Workout logging disabled');}); root.querySelector('#prefBodyMeasurements')?.addEventListener('change',e=>{f.bodyMeasurements=e.target.checked;save();show('fitness');toast(e.target.checked?'Body measurements enabled':'Body measurements disabled');}); }
     if (key === 'security') { root.querySelector('[data-security="sessions"]')?.addEventListener('click', () => toast('This browser is the only active local session.')); root.querySelector('[data-security="clear"]')?.addEventListener('click', () => confirmClearData()); }
     if (key === 'data') { root.querySelector('#exportBackup')?.addEventListener('click', exportBackup); root.querySelector('#importBackup')?.addEventListener('change', importBackup); if (state.settings?.storage?.mode === 'cloud' || state.settings?.storage?.mode === 'drive' || state.settings?.storage?.mode === 'both') bindDriveSettings(root); }
   }
   function safesettings() { if (!state.settings) state.settings = clone(defaultState.settings); return state.settings; }
-  function confirmClearData() { modal('Clear local data', 'This removes your saved Habitly data from this browser.', `<div class="confirm-box"><p>Your habits, goals, events and settings will be cleared from this browser. Google Drive data will not be deleted.</p><div class="form-actions"><button class="secondary-btn" data-modal-close>Cancel</button><button class="danger-btn" id="confirmClearSettings">Clear data</button></div></div>`); document.getElementById('confirmClearSettings').addEventListener('click', () => { if (currentStorageKey) localStorage.removeItem(currentStorageKey); localStorage.removeItem(STORAGE); state = freshUserState(currentAuthUser); closeModal(); render(); toast('Local data cleared'); }); }
+  function confirmClearData() { modal('Clear local data', 'This removes your saved Habitly data from this browser.', `<div class="confirm-box"><p>Your habits, goals, events and settings will be cleared from this browser. Google Drive data will not be deleted.</p><div class="form-actions"><button class="secondary-btn" data-modal-close>Cancel</button><button class="danger-btn" id="confirmClearSettings">Clear data</button></div></div>`); document.getElementById('confirmClearSettings').addEventListener('click', () => { if (currentStorageKey) localStorage.removeItem(currentStorageKey); localStorage.removeItem(STORAGE); state = freshUserState(currentAuthUser); resetSyncTracking(state); if (cloudStorageSelected()) { state.syncMeta.mutations=[]; state.syncMeta.pending={...defaultState.syncMeta.pending}; initializeCloudSync(); } closeModal(); render(); toast('Local browser data cleared — cloud data remains safe'); }); }
   function exportBackup() { const payload = { backupVersion: 3, app: 'Habitly', appVersion: APP_VERSION, accountId: currentAuthUser?.id || '', updatedAt: new Date().toISOString(), data: clone(state) }; const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }), url = URL.createObjectURL(blob), a = document.createElement('a'); a.href = url; a.download = `habitly-backup-${todayISO()}.json`; a.click(); URL.revokeObjectURL(url); toast('Backup exported'); }
   function importBackup(e) { const f = e.target.files?.[0]; if (!f) return; const r = new FileReader(); r.onload = () => { try { const incoming = JSON.parse(r.result); state = validateBackupEnvelope(incoming); save(); render(); toast('Backup restored'); } catch (err) { toast('Invalid Habitly backup'); } }; r.readAsText(f); }
   root.addEventListener('click', e => { const tab = e.target.closest('[data-settings-tab]'); if (tab) { e.preventDefault(); show(tab.dataset.settingsTab); } });
-  show('account');
+  show(window.__habitlyActiveSettingsSection || 'account');
 }
 
 function habitForm(id) {
@@ -2941,42 +3107,157 @@ function habitForm(id) {
 
 function goalForm(id) {
   const g = id ? state.goals.find(x => x.id === id) : null;
-  const selectedType = g?.type || 'target';
-  modal(id ? 'Edit goal' : 'Add goal', id ? 'Update your goal without losing progress.' : 'Turn an intention into a measurable goal.', `<form class="form" id="goalForm">
-    <div class="form-grid two"><div class="field"><label>Goal title *</label><input name="title" required value="${esc(g?.title || '')}" placeholder="e.g. Run a Half Marathon"></div><div class="field"><label>Category *</label><select name="category" required><option>Select category</option>${['Education', 'Finance', 'Health', 'Personal Growth', 'Lifestyle', 'Learning'].map(x => `<option ${x === g?.category ? 'selected' : ''}>${x}</option>`).join('')}</select></div></div>
-    <div class="field"><label>Choose an emoji</label><input class="emoji-input" name="emoji" value="${esc(g?.emoji || '')}" placeholder="Tap here and choose an emoji" inputmode="text" autocomplete="off"><small>Use your phone's emoji keyboard to choose any emoji.</small></div>
-    <div class="field"><label>Goal type</label><div class="goal-type">${[['target','Target'],['milestone','Milestone'],['habit','Habit Based']].map(([v,t]) => `<button type="button" class="${selectedType === v ? 'selected' : ''}" data-goal-type="${v}">${t}</button>`).join('')}</div></div>
-    <div class="form-grid two"><div class="field"><label id="goalTargetLabel">Target <span>*</span></label><input name="target" type="number" min="1" required value="${esc(g?.target ?? '')}" placeholder="e.g. 90, 100000, 8"></div><div class="field"><label>Unit</label><input name="unit" value="${esc(g?.unit || '')}" placeholder="%, ₹, kg, books, days"></div></div>
-    <div class="form-grid two"><div class="field"><label>Target date *</label><input name="date" type="date" required value="${esc(g?.date || '')}"></div><div class="field"><label>Notification time</label><div class="time-input"><input name="reminder" type="time" step="1" value="${esc(parseTime24(g?.reminder) || '')}">${icon('bell')}</div></div></div>
-    ${id ? `<label class="switch-row"><span><b>Pause goal</b><small>Pause without losing progress.</small></span><input type="checkbox" name="paused" ${g?.status === 'paused' ? 'checked' : ''}><i></i></label>` : ''}
-    <div class="form-actions"><button type="button" class="secondary-btn" data-modal-close>Cancel</button><button class="primary-btn">${id ? 'Save Changes' : 'Add Goal'} →</button></div>
-  </form>`);
+  const components = g?.components || { target: g?.type !== 'milestone' && g?.type !== 'habit', milestones: g?.type === 'milestone', habits: g?.type === 'habit' };
+  const isFitness = g?.type === 'fitness';
+  const ms = Array.isArray(g?.milestones) ? g.milestones : [];
+  const habitIds = Array.isArray(g?.goalHabitIds) ? g.goalHabitIds : [];
+  const fitness = g?.fitness || {};
+  const selectedCategory = g?.category || (isFitness ? 'Fitness' : 'Personal Growth');
+  const milestoneRows = ms.map(m => `<div class="goal-builder-row milestone-builder-row"><input class="gh-title" name="milestoneTitle" value="${esc(m.title)}" placeholder="Checkpoint name"><input class="gh-value" name="milestoneValue" type="number" step="any" value="${m.value == null ? '' : esc(m.value)}" placeholder="Value"><button type="button" class="remove-builder" data-remove-milestone="${esc(m.id)}">×</button></div>`).join('');
+  const habitOptions = state.habits.map(h => `<label class="goal-habit-option"><input type="checkbox" name="goalHabit" value="${esc(h.id)}" ${habitIds.includes(h.id)?'checked':''}><span>${esc(h.emoji || '•')} ${esc(h.name)}</span><small>${pct(h)}%</small></label>`).join('');
 
-  const form = document.getElementById('goalForm');
-  let goalType = selectedType;
-  const syncGoalType = () => {
-    form.querySelectorAll('[data-goal-type]').forEach(b => b.classList.toggle('selected', b.dataset.goalType === goalType));
-    const label = form.querySelector('#goalTargetLabel');
-    if (label) label.innerHTML = goalType === 'milestone' ? 'Milestone target <span>*</span>' : goalType === 'habit' ? 'Habit target <span>*</span>' : 'Target <span>*</span>';
-  };
-  form.querySelectorAll('[data-goal-type]').forEach(b => b.addEventListener('click', () => { goalType = b.dataset.goalType; syncGoalType(); }));
-  syncGoalType();
+  modal(id ? 'Edit goal' : 'Add goal',
+    'Build a goal from the parts you actually need. Target = destination, milestones = checkpoints, habits = repeated actions.',
+    `<form class="form goal-form" id="goalForm" novalidate>
+      <div class="form-grid two">
+        <div class="field"><label>Goal title *</label><input name="title" required value="${esc(g?.title || '')}" placeholder="e.g. Become Cloud Security Engineer"></div>
+        <div class="field"><label>Category *</label><select name="category" required><option value="">Select category</option>${['Education','Finance','Health','Fitness','Personal Growth','Lifestyle','Learning','Career'].map(x => `<option value="${x}" ${x===selectedCategory?'selected':''}>${x}</option>`).join('')}</select></div>
+      </div>
+      <div class="field"><label>Emoji</label><input class="emoji-input" name="emoji" value="${esc(g?.emoji || (isFitness?'🏋️':'🎯'))}" placeholder="Choose an emoji" inputmode="text"></div>
 
-  form.addEventListener('submit', e => {
-    e.preventDefault();
-    const fd = new FormData(form);
-    const category = fd.get('category');
-    if (category === 'Select category') { toast('Choose a category'); return; }
-    const target = Math.max(1, Number(fd.get('target')) || 1);
-    const reminder = String(fd.get('reminder') || '');
-    if (id) {
-      Object.assign(g, { title: String(fd.get('title')).trim(), category, emoji: String(fd.get('emoji') || '').trim(), type: goalType, target, unit: String(fd.get('unit') || '').trim(), date: fd.get('date'), reminder, status: fd.get('paused') === 'on' ? 'paused' : (goalPct(g) >= 100 ? 'completed' : 'active'), updatedAt: new Date().toISOString() });
-      g.current = Math.min(Number(g.current) || 0, target);
-    } else {
-      state.goals.push({ id: uid('g'), title: String(fd.get('title')).trim(), category, emoji: String(fd.get('emoji') || '').trim(), type: goalType, target, current: 0, unit: String(fd.get('unit') || '').trim(), date: fd.get('date'), reminder, status: 'active', updatedAt: new Date().toISOString() });
+      <div class="goal-component-picker">
+        <div class="settings-subhead"><b>What does this goal need?</b><small>Use any combination. You do not have to use all three.</small></div>
+        <label class="goal-component-option"><input type="checkbox" name="useTarget" ${components.target?'checked':''}><span><b>Target</b><small>The final destination — e.g. 50 → 60 kg, ₹0 → ₹1,00,000, 7.8 → 9.0 CGPA.</small></span></label>
+        <label class="goal-component-option"><input type="checkbox" name="useMilestones" ${components.milestones?'checked':''}><span><b>Milestones</b><small>Meaningful checkpoints along the way.</small></span></label>
+        <label class="goal-component-option"><input type="checkbox" name="useHabits" ${components.habits?'checked':''}><span><b>Supporting habits</b><small>Repeated actions that help you reach the goal.</small></span></label>
+      </div>
+
+      <section id="targetBuilder" class="goal-builder-section">
+        <div class="settings-subhead"><b>Target · Destination</b><small>Define the result you want to reach.</small></div>
+        <div class="form-grid two">
+          <div class="field"><label>Target value *</label><input name="target" type="number" step="any" min="0" value="${esc(g?.target ?? '')}" placeholder="e.g. 60"></div>
+          <div class="field"><label>Unit</label><input name="unit" value="${esc(g?.unit || '')}" placeholder="kg, %, ₹, books"></div>
+        </div>
+      </section>
+
+      <section id="fitnessBuilder" class="goal-builder-section ${isFitness ? '' : 'hidden'}">
+        <div class="settings-subhead"><b>Fitness target</b><small>Weight tracking is built into a Fitness goal.</small></div>
+        <div class="form-grid two">
+          <div class="field"><label>Objective</label><select name="fitnessDirection"><option value="gain" ${fitness.direction!=='loss'?'selected':''}>Gain weight / build mass</option><option value="loss" ${fitness.direction==='loss'?'selected':''}>Lose weight / reduce mass</option></select></div>
+          <div class="field"><label>Starting weight (kg) *</label><input name="startWeight" type="number" step="0.1" min="1" value="${esc(fitness.startWeight ?? g?.current ?? '')}"></div>
+          <div class="field"><label>Target weight (kg) *</label><input name="targetWeight" type="number" step="0.1" min="1" value="${esc(fitness.targetWeight ?? g?.target ?? '')}"></div>
+          <div class="field"><label>Height (cm) <small>optional</small></label><input name="height" type="number" step="0.1" min="1" value="${esc(fitness.height ?? '')}"></div>
+        </div>
+      </section>
+
+      <section id="milestoneBuilder" class="goal-builder-section ${components.milestones?'':'hidden'}">
+        <div class="settings-subhead"><b>Milestones · Checkpoints</b><small>For measurable milestones, enter a value. Fitness milestones are completed automatically from your weight.</small></div>
+        <div id="milestoneRows">${milestoneRows}</div>
+        <button type="button" class="secondary-btn" id="addMilestone">+ Add milestone</button>
+      </section>
+
+      <section id="habitBuilder" class="goal-builder-section ${components.habits?'':'hidden'}">
+        <div class="settings-subhead"><b>Supporting habits</b><small>Select existing habits that contribute to this goal. Habit progress remains on the Habits page.</small></div>
+        <div class="goal-habit-list">${habitOptions || '<div class="muted-copy">Create a habit first, then link it here.</div>'}</div>
+      </section>
+
+      <div class="form-grid two">
+        <div class="field"><label>Target date <small>optional</small></label><input name="date" type="date" value="${esc(g?.date || '')}"></div>
+        <div class="field"><label>Notification time</label><input name="reminder" class="time-text-input" type="text" value="${esc(g?.reminder ? formatTimeShort(g.reminder) : '')}" placeholder="${userTimeFormat()==='12h'?'8:00 PM':'20:00'}" autocomplete="off"></div>
+      </div>
+      ${id ? `<label class="switch-row"><span><b>Pause goal</b><small>Pause without losing progress.</small></span><input type="checkbox" name="paused" ${g?.status === 'paused' ? 'checked' : ''}><i></i></label>` : ''}
+      <div class="form-actions"><button type="button" class="secondary-btn" data-modal-close>Cancel</button><button type="submit" class="primary-btn" data-goal-submit>${id ? 'Save Changes' : 'Create Goal'} →</button></div>
+    </form>`);
+
+  const form=document.getElementById('goalForm');
+  if(!form) return;
+  const targetBuilder=form.querySelector('#targetBuilder');
+  const fitnessBuilder=form.querySelector('#fitnessBuilder');
+  const milestoneBuilder=form.querySelector('#milestoneBuilder');
+  const habitBuilder=form.querySelector('#habitBuilder');
+  const targetInput=form.querySelector('[name="target"]');
+  const targetUnit=form.querySelector('[name="unit"]');
+  const categoryInput=form.querySelector('[name="category"]');
+
+  function syncBuilder() {
+    const fitnessNow = categoryInput.value === 'Fitness' || isFitness;
+    if (fitnessNow) {
+      form.querySelector('[name="useTarget"]').checked = true;
     }
-    save(); closeModal(); render(); toast(id ? 'Goal updated' : 'Goal added');
+    const useTarget=form.querySelector('[name="useTarget"]').checked;
+    const useMilestones=form.querySelector('[name="useMilestones"]').checked;
+    const useHabits=form.querySelector('[name="useHabits"]').checked;
+    targetBuilder.classList.toggle('hidden', !useTarget || fitnessNow);
+    fitnessBuilder.classList.toggle('hidden', !fitnessNow);
+    milestoneBuilder.classList.toggle('hidden', !useMilestones);
+    habitBuilder.classList.toggle('hidden', !useHabits);
+    targetInput.required=useTarget && !fitnessNow;
+    targetInput.disabled=!useTarget || fitnessNow;
+    targetUnit.disabled=!useTarget || fitnessNow;
+  }
+  form.querySelectorAll('input[name^="use"]').forEach(x=>x.addEventListener('change',syncBuilder));
+  categoryInput?.addEventListener('change',()=>{ syncBuilder(); });
+  form.querySelector('#addMilestone')?.addEventListener('click',()=>{
+    const row=document.createElement('div');
+    row.className='goal-builder-row milestone-builder-row';
+    row.innerHTML='<input class="gh-title" name="milestoneTitle" placeholder="Checkpoint name"><input class="gh-value" name="milestoneValue" type="number" step="any" placeholder="Value"><button type="button" class="remove-builder">×</button>';
+    row.querySelector('.remove-builder').addEventListener('click',()=>row.remove());
+    form.querySelector('#milestoneRows').appendChild(row);
   });
+  form.querySelectorAll('[data-remove-milestone]').forEach(b=>b.addEventListener('click',()=>b.closest('.milestone-builder-row')?.remove()));
+  syncBuilder();
+
+  const submitGoal = () => {
+    const fd=new FormData(form), title=String(fd.get('title')||'').trim(), category=String(fd.get('category')||''), date=String(fd.get('date')||'');
+    const useTarget=fd.get('useTarget')==='on', useMilestones=fd.get('useMilestones')==='on', useHabits=fd.get('useHabits')==='on';
+    if(!title) { toast('Enter a goal title'); form.querySelector('[name="title"]')?.focus(); return; }
+    if(!category) { toast('Choose a goal category'); categoryInput?.focus(); return; }
+    if(!useTarget&&!useMilestones&&!useHabits) { toast('Select at least one goal component'); return; }
+
+    let type='target';
+    if(isFitness || category === 'Fitness') type='fitness';
+    else if(useTarget) type='target';
+    else if(useMilestones) type='milestone';
+    else type='habit';
+
+    let target=Math.max(1,Number(fd.get('target'))||1);
+    let unit=String(fd.get('unit')||'').trim();
+    let nextFitness=g?.fitness ? clone(g.fitness) : null;
+
+    if(type==='fitness') {
+      const direction=String(fd.get('fitnessDirection')||'gain');
+      const startWeight=Number(fd.get('startWeight')), targetWeight=Number(fd.get('targetWeight'));
+      if(!Number.isFinite(startWeight)||!Number.isFinite(targetWeight)||startWeight<=0||targetWeight<=0) { toast('Enter valid start and target weights'); return; }
+      if((direction==='gain'&&targetWeight<=startWeight)||(direction==='loss'&&targetWeight>=startWeight)) { toast(direction==='gain'?'Target weight must be higher than starting weight':'Target weight must be lower than starting weight'); return; }
+      nextFitness=nextFitness||{weightEntries:[],measurements:[],workouts:[]};
+      Object.assign(nextFitness,{direction,startWeight,targetWeight,height:Number(fd.get('height'))||0,age:Number(nextFitness.age)||0,gender:String(nextFitness.gender||'')});
+      if(!Array.isArray(nextFitness.weightEntries)||!nextFitness.weightEntries.length) nextFitness.weightEntries=[{id:uid('fw'),date:todayISO(),weight:startWeight,bodyFat:0,notes:'Starting weight',updatedAt:new Date().toISOString()}];
+      target=targetWeight; unit='kg';
+    }
+
+    const milestones=[];
+    const titles=fd.getAll('milestoneTitle'), values=fd.getAll('milestoneValue');
+    titles.forEach((t,i)=>{const mt=String(t||'').trim(); if(!mt)return; const value=String(values[i]??'').trim(); const numeric=value===''?null:Number(value); milestones.push({id:uid('gm'),title:mt,value:Number.isFinite(numeric)?numeric:null,completed:false,completedAt:'',updatedAt:new Date().toISOString()});});
+    const oldMilestones=Array.isArray(g?.milestones)?g.milestones:[];
+    milestones.forEach(m=>{const oldm=oldMilestones.find(x=>String(x.title||'').trim().toLowerCase()===m.title.toLowerCase() && (m.value==null || Number(x.value)===Number(m.value)));if(oldm){m.id=oldm.id;m.completed=!!oldm.completed;m.completedAt=oldm.completedAt||'';}});
+    const selectedHabitIds=fd.getAll('goalHabit').map(String);
+
+    const payload={title,category,emoji:String(fd.get('emoji')||'🎯').trim()||'🎯',type,target,current:type==='fitness'?fitnessCurrentWeight({fitness:nextFitness,type:'fitness',current:Number(fd.get('startWeight'))||0}):Math.max(0,Number(g?.current)||0),unit,date,reminder:parseTime24(fd.get('reminder'))||'',components:{target:useTarget||type==='fitness',milestones:useMilestones,habits:useHabits},milestones,goalHabitIds:selectedHabitIds,status:fd.get('paused')==='on'?'paused':'active',updatedAt:new Date().toISOString()};
+    if(type==='fitness') payload.fitness=nextFitness;
+    if(id) Object.assign(g,payload);
+    else state.goals.push({...payload,id:uid('g')});
+    const savedGoal=id?g:state.goals[state.goals.length-1];
+    normalizeGoalComponents(savedGoal);
+    if(savedGoal.type==='fitness'){savedGoal.current=fitnessCurrentWeight(savedGoal);savedGoal.status=fitnessGoalStatus(savedGoal);}
+    const persisted=save();
+    if(!persisted){ toast('Could not save goal. Your changes were not confirmed.'); return; }
+    closeModal(); render(); toast(id?'Goal updated':'Goal created');
+  };
+  // The button is a real submit control; use the form submit event as the single source of truth.
+  // A capture-phase fallback is installed below for browsers/extensions that intercept
+  // submit events inside dynamically-rendered modal content.
+  form.addEventListener('submit', e => { e.preventDefault(); e.stopPropagation(); submitGoal(); });
+
 }
 
 function eventForm(idOrDate) {
@@ -2984,46 +3265,23 @@ function eventForm(idOrDate) {
   const existing = editing ? state.events.find(e => e.id === idOrDate) : null;
   const defaultDate = editing ? existing.date : (idOrDate || calendarSelectedDate || todayISO());
   const linkedReminder = existing ? state.reminders.find(r => r.eventId === existing.id && r.source === 'manual') : null;
-  const defaultReminderTime = linkedReminder
-    ? eventReminderTimeValue(existing?.date, existing?.time, linkedReminder.offsetMinutes)
-    : eventReminderTimeValue(existing?.date || defaultDate, existing?.time || '12:00:00', 0);
-  const defaultOffset = linkedReminder ? Number(linkedReminder.offsetMinutes || 0) : Number(state.settings?.notifications?.defaultEventOffset ?? 0);
-  modal(editing ? 'Edit event' : 'Add event', editing ? 'Update the event and its reminder settings.' : 'Schedule an event and optionally notify you at the event time or before it.', `<form class="form" id="eventForm">
+  const defaultReminderTime = existing
+    ? eventReminderTimeValue(existing.date, existing.time, 0)
+    : eventReminderTimeValue(defaultDate, '12:00:00', 0);
+  modal(editing ? 'Edit event' : 'Add event', editing ? 'Update the event and its reminder settings.' : 'Schedule an event. Habitly will remind you at the scheduled event time.', `<form class="form" id="eventForm">
     <div class="form-grid two">
       <div class="field"><label>Event title *</label><input name="title" required value="${esc(existing?.title || '')}" placeholder="e.g. Team Meeting"></div>
       <div class="field"><label>Emoji</label><input name="emoji" class="emoji-input" value="${esc(existing?.emoji || '📅')}" placeholder="Choose an emoji" inputmode="text"></div>
     </div>
     <div class="form-grid two">
       <div class="field"><label>Date *</label><input name="date" type="date" required value="${esc(defaultDate)}"></div>
-      <div class="field"><label>Time *</label><input name="time" type="time" step="1" required value="${esc(parseTime24(existing?.time) || '12:00:00')}"></div>
+      <div class="field"><label>Time *</label><input name="time" class="time-text-input" type="text" required value="${esc(formatTimeShort(existing?.time || '12:00:00'))}" placeholder="${userTimeFormat()==='12h'?'12:00 PM':'12:00'}" autocomplete="off"></div>
     </div>
-    <label class="switch-row"><span><b>Reminder</b><small>Get notified before this event.</small></span><input type="checkbox" name="hasReminder" ${editing ? (linkedReminder ? 'checked' : '') : 'checked'}><i></i></label>
-    <div class="form-grid two event-reminder-fields">
-      <div class="field"><label>Reminder time</label><input name="reminderTime" type="time" step="1" value="${esc(parseTime24(defaultReminderTime) || '12:00:00')}" readonly aria-readonly="true" title="Calculated from the event time and reminder offset"></div>
-      <div class="field"><label>Notify me</label><select name="offsetMinutes">
-        ${[[0,'At event time'],[5,'5 minutes before'],[10,'10 minutes before'],[15,'15 minutes before'],[30,'30 minutes before'],[60,'1 hour before'],[1440,'1 day before']].map(([v,t]) => `<option value="${v}" ${v===defaultOffset?'selected':''}>${t}</option>`).join('')}
-      </select></div>
-    </div>
-    <div class="field event-reminder-fields"><label>Reminder sound</label><div class="form-grid two"><select name="sound">${[['gentle','Gentle Bell'],['chime','Soft Chime'],['calm','Calm'],['classic','Classic'],['simple','Simple'],['bright','Bright'],['marimba','Marimba'],['digital','Digital'],['none','No Sound']].map(([v,t]) => `<option value="${v}" ${v === (linkedReminder?.sound || 'gentle') ? 'selected' : ''}>${t}</option>`).join('')}</select><button type="button" class="secondary-btn reminder-preview-btn" id="previewEventSound">▶ Preview sound</button></div></div>
+    <div class="event-notification-note"><span>${icon('bell')}</span><div><b>Event reminder</b><small>Habitly will notify you at the exact scheduled event time. There is no separate “remind me before” setting.</small></div></div>
+    <div class="field"><label>Reminder sound</label><div class="form-grid two"><select name="sound">${[['gentle','Gentle Bell'],['chime','Soft Chime'],['calm','Calm'],['classic','Classic'],['simple','Simple'],['bright','Bright'],['marimba','Marimba'],['digital','Digital'],['none','No Sound']].map(([v,t]) => `<option value="${v}" ${v === (linkedReminder?.sound || 'gentle') ? 'selected' : ''}>${t}</option>`).join('')}</select><button type="button" class="secondary-btn reminder-preview-btn" id="previewEventSound">▶ Preview sound</button></div></div>
     <div class="form-actions"><button type="button" class="secondary-btn" data-modal-close>Cancel</button>${editing ? '<button type="button" class="danger-btn" id="deleteEvent">Delete Event</button>' : ''}<button class="primary-btn">${editing ? 'Save Changes' : 'Add Event'} →</button></div>
   </form>`);
   const form = document.getElementById('eventForm'); if (!form) return;
-  const hasReminder = form.querySelector('[name="hasReminder"]'), reminderFields = () => form.querySelectorAll('.event-reminder-fields');
-  const reminderTimeInput = form.querySelector('[name="reminderTime"]');
-  const syncReminderFields = () => reminderFields().forEach(x => x.style.display = hasReminder?.checked ? '' : 'none');
-  const syncCalculatedReminderTime = () => {
-    if (!reminderTimeInput) return;
-    const date = String(form.querySelector('[name="date"]')?.value || '');
-    const time = String(form.querySelector('[name="time"]')?.value || '');
-    const offset = Number(form.querySelector('[name="offsetMinutes"]')?.value || 0);
-    reminderTimeInput.value = eventReminderTimeValue(date, time, offset).slice(0, 8);
-  };
-  hasReminder?.addEventListener('change', syncReminderFields);
-  form.querySelector('[name="date"]')?.addEventListener('change', syncCalculatedReminderTime);
-  form.querySelector('[name="time"]')?.addEventListener('change', syncCalculatedReminderTime);
-  form.querySelector('[name="offsetMinutes"]')?.addEventListener('change', syncCalculatedReminderTime);
-  syncReminderFields();
-  syncCalculatedReminderTime();
   form.querySelector('#previewEventSound')?.addEventListener('click', () => playReminderSound(String(form.querySelector('[name="sound"]')?.value || 'gentle')));
   form.addEventListener('submit', e => {
     e.preventDefault();
@@ -3034,12 +3292,10 @@ function eventForm(idOrDate) {
     let event = existing;
     if (event) Object.assign(event, { title, emoji:String(fd.get('emoji') || '📅').trim() || '📅', date, time, updatedAt:now });
     else { event = { id:uid('e'), title, emoji:String(fd.get('emoji') || '📅').trim() || '📅', date, time, updatedAt:now }; state.events.push(event); }
-    const wantsReminder = fd.get('hasReminder') === 'on';
-    const offsetMinutes = Number(fd.get('offsetMinutes') || 0);
-    // Event reminder time is derived from the event time + offset. Keeping the
-    // stored time aligned with that calculation avoids misleading reminder
-    // times when an event is edited. The scheduler remains date-aware.
-    const reminderTime = eventReminderTimeValue(date, time, offsetMinutes) || time;
+    const wantsReminder = state.settings?.notifications?.eventReminders !== false;
+    const offsetMinutes = 0;
+    // Event reminders always use the event's exact scheduled time.
+    const reminderTime = eventReminderTimeValue(date, time, 0) || time;
     const sound = String(fd.get('sound') || 'gentle');
     const old = state.reminders.find(r => r.eventId === event.id && r.source === 'manual');
     if (wantsReminder) {
@@ -3118,7 +3374,14 @@ function setTodayLabels() {
     document.querySelectorAll('.today-time').forEach(x => x.textContent = ` · ${timeText}`);
   };
   update();
-  if (!headerClockTimer) headerClockTimer = setInterval(update, 1000);
+  if (!headerClockTimer) {
+    const scheduleNextMinute = () => {
+      update();
+      const delay = Math.max(250, 60000 - (Date.now() % 60000) + 50);
+      headerClockTimer = setTimeout(scheduleNextMinute, delay);
+    };
+    headerClockTimer = setTimeout(scheduleNextMinute, Math.max(250, 60000 - (Date.now() % 60000) + 50));
+  }
 }
 function navigate(route) { if (!ROUTES.includes(route)) return; location.hash = '/' + route; }
 function bindCommon() {
@@ -3170,7 +3433,6 @@ function bindCommon() {
   document.querySelectorAll('[data-close-reminders]').forEach(b => b.addEventListener('click', () => document.getElementById('reminderPopover')?.classList.add('hidden')));
   document.addEventListener('keydown', keyHandler, { once: true });
   document.querySelectorAll('[data-open-habit]').forEach(b => b.addEventListener('click', () => habitForm()));
-  document.querySelectorAll('[data-open-goal]').forEach(b => b.addEventListener('click', () => goalForm()));
   if (currentRoute() === 'dashboard') {
     const root = document.getElementById('dashboardHabits'); if (root) bindHabitInteractions(root);
     document.querySelectorAll('[data-filter-group="dashboard"] .filter').forEach(b => b.addEventListener('click', () => { document.querySelectorAll('[data-filter-group="dashboard"] .filter').forEach(x => x.classList.toggle('active', x === b)); const filter = b.dataset.filter; const habits = state.habits.filter(h => !h.paused && (filter === 'All' || h.category === filter)); if (root) root.innerHTML = habits.map(h => habitRow(h)).join('') || '<div class="empty-state"><strong>No habits in this category.</strong></div>'; if (root) bindHabitInteractions(root); }));
@@ -3183,7 +3445,26 @@ function toast(message) { const t = document.getElementById('toast'); if (!t) re
 function showUndoToast(message, undo) { const t = document.getElementById('toast'); if (!t) return; clearTimeout(window.__toast); clearTimeout(window.__undoToast); t.innerHTML = `<span>${esc(message)}</span><button type="button" class="toast-undo" id="toastUndo">Undo</button><i class="toast-timer"></i>`; t.classList.add('show', 'toast-with-action'); const btn=document.getElementById('toastUndo'); btn?.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); clearTimeout(window.__undoToast); t.classList.remove('show', 'toast-with-action'); t.innerHTML = ''; undo(); }); window.__undoToast = setTimeout(() => { t.classList.remove('show', 'toast-with-action'); t.innerHTML = ''; pendingUndo = null; }, 6000); }
 function modal(title, subtitle, html) { document.getElementById('modal-root').innerHTML = `<div class="modal-backdrop" data-modal-close><section class="modal" role="dialog" aria-modal="true" aria-label="${esc(title)}" onclick="event.stopPropagation()"><button class="modal-close" data-modal-close aria-label="Close">×</button><div class="modal-head"><h2>${esc(title)}</h2><p>${esc(subtitle || '')}</p></div>${html}</section></div>`; document.querySelectorAll('[data-modal-close]').forEach(b => b.addEventListener('click', closeModal)); }
 function closeModal() { document.getElementById('modal-root').innerHTML = ''; }
+
+// Modal action safety net: dynamically-rendered Goal forms should never depend on
+// bubbling through the modal shell. Capture the click before the modal backdrop
+// or any other delegated handler can consume it, then submit the actual form.
+if (!window.__habitlyGoalSubmitGuard) {
+  window.__habitlyGoalSubmitGuard = true;
+  document.addEventListener('click', e => {
+    const button = e.target.closest?.('#goalForm [data-goal-submit]');
+    if (!button) return;
+    const form = button.form || document.getElementById('goalForm');
+    if (!form) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    if (typeof form.requestSubmit === 'function') form.requestSubmit(button);
+    else form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+  }, true);
+}
 document.addEventListener('click', e => {
+  const addGoalButton = e.target.closest('[data-open-goal]');
+  if (addGoalButton) { e.preventDefault(); e.stopPropagation(); goalForm(); return; }
   const addEventButton = e.target.closest('[data-add-event]');
   if (addEventButton) { e.preventDefault(); e.stopPropagation(); eventForm(calendarSelectedDate); return; }
   const action = e.target.closest('[data-menu-action]'); if (action) { const kind = action.closest('.menu-popover').dataset.kind, id = action.dataset.menuId; const obj = kind === 'goal' ? state.goals.find(g => g.id === id) : state.habits.find(h => h.id === id); if (!obj) return; const a = action.dataset.menuAction; if (a === 'update' && kind === 'goal') goalProgressForm(id); if (a === 'edit') kind === 'goal' ? goalForm(id) : habitForm(id); if (a === 'reminder' && kind === 'habit') { const existingReminder = state.reminders.find(r => r.habitId === id && r.source === 'manual'); reminderForm(existingReminder?.id); } if (a === 'trash') confirmDelete(kind, id); if (a === 'pause' && kind === 'goal') { obj.status = 'paused'; obj.updatedAt = new Date().toISOString(); save(); render(); toast('Goal paused'); }
@@ -3249,21 +3530,28 @@ if ('serviceWorker' in navigator) {
   });
 }
 
+async function registerAuthenticatedVisitor(nextUser) {
+  const sb = window.habitlySupabase;
+  if (!sb || !nextUser?.email) return;
+  const name = String(nextUser.user_metadata?.full_name || nextUser.user_metadata?.name || nextUser.email.split('@')[0] || 'Habitly User').trim();
+  try {
+    const { error } = await sb.rpc('register_visitor', { p_name: name, p_email: nextUser.email });
+    if (error) console.warn('Habitly visitor registration failed:', error.message);
+  } catch (error) {
+    console.warn('Habitly visitor registration failed:', error);
+  }
+}
+
 async function handleAuthenticatedUser(nextUser) {
   if (driveHydrationConfirmedUserId && driveHydrationConfirmedUserId !== nextUser?.id) driveHydrationConfirmedUserId = '';
   state = loadStateForUser(nextUser);
+  registerAuthenticatedVisitor(nextUser);
   resetSyncTracking(state);
   if (!state.profile.email) state.profile.email = nextUser.email || '';
-  if (nextUser.user_metadata?.habitly_storage_setup && nextUser.user_metadata?.habitly_storage_mode === 'local') {
-    state.settings.storage = { mode: 'local', setupCompleted: true };
-  } else {
-    state.settings.storage = { mode: 'cloud', setupCompleted: true };
-  }
-  startReminderService();
-  // New architecture: every authenticated account uses local-first Supabase
-  // synchronization. Legacy Drive/Both account metadata is migrated to cloud
-  // mode. Google Drive is optional backup/restore only.
+  // Authenticated Habitly accounts always use Supabase as the authoritative
+  // cross-device source. Legacy local/Drive metadata is migrated to cloud mode.
   state.settings.storage = { mode: 'cloud', setupCompleted: true };
+  startReminderService();
   try { await persistStorageChoice('cloud'); } catch (_) {}
   appPhase = 'READY';
   initializeCloudSync().finally(() => {
@@ -3283,6 +3571,7 @@ function clearAuthenticatedState() {
   clearInterval(driveRealtimePollTimer);
   clearInterval(reminderUiTimer);
   clearInterval(headerClockTimer);
+  clearTimeout(headerClockTimer);
   headerClockTimer = null;
   clearTimeout(reminderSchedulerTimer);
   reminderUiTimer = null;
@@ -3331,6 +3620,7 @@ if (typeof window !== 'undefined') {
     save: options => save(options),
     appendSyncMutations: (previous, current) => appendSyncMutations(previous, current),
     mergeForDriveUpload: (remote, local, dirty, base) => mergeForDriveUpload(remote, local, dirty, base),
+    mergeCloudHydration: (remote, local) => mergeCloudHydration(remote, local),
     isSuspiciousEmptySync: (local, remote, mutations) => isSuspiciousEmptySync(local, remote, mutations),
     cloudDocumentState: source => cloudDocumentState(source),
     validateCloudDocument: row => validateCloudDocument(row),

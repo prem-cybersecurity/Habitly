@@ -69,19 +69,36 @@ language plpgsql
 security definer
 set search_path = public
 as $$
-declare existing_id bigint;
+declare
+  existing_id bigint;
+  normalized_email text := lower(trim(p_email));
+  caller_email text := lower(coalesce(auth.jwt() ->> 'email', ''));
 begin
-  select id into existing_id from public.visitors where lower(email) = lower(trim(p_email)) limit 1;
-  if existing_id is null then
-    insert into public.visitors(name,email) values (trim(p_name),lower(trim(p_email)));
-  else
-    update public.visitors
-      set name = trim(p_name), last_seen_at = now(), visit_count = visit_count + 1
-      where id = existing_id;
+  if trim(coalesce(p_name, '')) = '' or normalized_email = '' then
+    return;
   end if;
+
+  select id into existing_id
+    from public.visitors
+   where lower(email) = normalized_email
+   limit 1;
+
+  if existing_id is null then
+    insert into public.visitors(name, email)
+    values (trim(p_name), normalized_email);
+  elsif caller_email <> '' and caller_email = normalized_email then
+    -- Only the authenticated owner of an existing email may update that row.
+    update public.visitors
+       set name = trim(p_name),
+           last_seen_at = now(),
+           visit_count = visit_count + 1
+     where id = existing_id;
+  end if;
+  -- Anonymous callers cannot mutate an existing visitor record.
 end;
 $$;
 
+revoke execute on function public.register_visitor(text, text) from public;
 grant execute on function public.register_visitor(text, text) to anon, authenticated;
 
 -- ============================================================

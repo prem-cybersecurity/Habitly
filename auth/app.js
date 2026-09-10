@@ -32,7 +32,7 @@ function notifyParent(type, detail = {}) {
             type,
             ...detail
         },
-        "*"
+        window.location.origin
     );
 }
 
@@ -77,7 +77,7 @@ function ensurehabitlyAuth() {
 }
 
 function getRedirectUrl() {
-    return `${window.top.location.origin}/index.html`;
+    return `${window.location.origin}/index.html`;
 }
 
 function icon(type) {
