@@ -432,3 +432,132 @@ h1 .accent { color: var(--purple); }
     animation-duration: .01ms !important;
   }
 }
+
+/* =========================================================
+   AUTH UX ENHANCEMENTS
+========================================================= */
+.password-strength {
+  margin-top: -8px;
+  padding: 12px 14px;
+  border: 1px solid #eee5f7;
+  border-radius: 10px;
+  background: #fcfaff;
+}
+.password-strength-top {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: #77718b;
+  font-size: 11px;
+  font-weight: 700;
+}
+.password-strength-top strong { color: var(--purple); }
+.password-strength-top strong[data-level="1"] { color: #b96b20; }
+.password-strength-top strong[data-level="2"] { color: #a06b16; }
+.password-strength-top strong[data-level="3"] { color: var(--success); }
+.password-strength-bar {
+  height: 5px;
+  margin-top: 8px;
+  overflow: hidden;
+  border-radius: 99px;
+  background: #eee7f6;
+}
+.password-strength-bar span {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--purple);
+  transition: width .2s ease;
+}
+.password-rules {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  margin-top: 8px;
+  color: #9891a6;
+  font-size: 10px;
+}
+.password-rules span::before { content: "○"; margin-right: 4px; }
+.password-rules span.is-ok { color: var(--success); }
+.password-rules span.is-ok::before { content: "✓"; }
+
+.btn-spinner {
+  display: inline-block;
+  width: 15px;
+  height: 15px;
+  margin-right: 9px;
+  vertical-align: -2px;
+  border: 2px solid rgba(255,255,255,.45);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: auth-spin .7s linear infinite;
+}
+@keyframes auth-spin { to { transform: rotate(360deg); } }
+
+.auth-toast {
+  position: fixed;
+  z-index: 1000;
+  right: 24px;
+  bottom: 24px;
+  width: min(420px, calc(100vw - 32px));
+  display: grid;
+  grid-template-columns: 34px 1fr auto auto;
+  align-items: center;
+  gap: 11px;
+  padding: 14px 14px 14px 12px;
+  border: 1px solid #e5d7f1;
+  border-radius: 14px;
+  background: rgba(255,255,255,.98);
+  box-shadow: 0 16px 40px rgba(27, 9, 58, .18);
+  animation: toast-in .22s ease-out;
+}
+.auth-toast-icon {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: #f2e8ff;
+  color: var(--purple);
+  font-weight: 900;
+}
+.auth-toast-body { min-width: 0; display: grid; gap: 3px; }
+.auth-toast-body strong { font-size: 13px; line-height: 1.35; }
+.auth-toast-body span { color: #77718b; font-size: 11px; line-height: 1.4; }
+.auth-toast-action {
+  border: 0;
+  padding: 6px 4px;
+  background: transparent;
+  color: var(--purple);
+  font-size: 12px;
+  font-weight: 850;
+  white-space: nowrap;
+}
+.auth-toast-action:hover { text-decoration: underline; }
+.auth-toast-close {
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #938ba1;
+  font-size: 20px;
+  line-height: 1;
+}
+.auth-toast-close:hover { background: #f7f2fb; color: #4f4760; }
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (max-width: 560px) {
+  .auth-toast {
+    right: 16px;
+    bottom: 16px;
+    grid-template-columns: 30px 1fr auto;
+  }
+  .auth-toast-icon { width: 30px; height: 30px; }
+  .auth-toast-action { grid-column: 2; justify-self: start; padding-left: 0; }
+  .auth-toast-close { grid-column: 3; grid-row: 1 / span 2; }
+}

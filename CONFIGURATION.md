@@ -39,3 +39,7 @@ on conflict (user_id) do update set role = excluded.role;
 Do not expose or add a Supabase service-role key to the browser.
 
 Visitor records are created automatically when a user successfully authenticates through Habitly. The Admin page reads those records through the `admins may read visitors` RLS policy.
+
+
+### Email verification
+Habitly supports Supabase email-signup verification codes (6-digit OTP) on the verification screen. The Supabase Auth email template should provide the verification token/code. After `verifyOtp({ type: 'signup' })` succeeds, the authenticated session is handled by the parent auth gate.

@@ -66,6 +66,57 @@ function setStatus(id, message) {
     }
 }
 
+function friendlyAuthError(error, fallback = "Something went wrong. Please try again.") {
+    const message = String(error?.message || "").toLowerCase();
+
+    if (message.includes("invalid login credentials")) return "Email or password is incorrect.";
+    if (message.includes("email not confirmed")) return "Please verify your email before signing in.";
+    if (message.includes("too many requests") || message.includes("rate limit")) return "Too many attempts. Please wait a moment and try again.";
+    if (message.includes("password should be at least") || message.includes("password must")) return "Your password does not meet the required security rules.";
+    if (message.includes("user already registered")) return "This email is already registered. Try signing in instead.";
+    if (message.includes("invalid or expired")) return "This code is invalid or has expired. Request a new code.";
+    if (message.includes("email address") && message.includes("invalid")) return "Enter a valid email address.";
+
+    return error?.message || fallback;
+}
+
+function showToast(message, { actionLabel = "", actionRoute = "", duration = 7000 } = {}) {
+    document.querySelectorAll(".auth-toast").forEach(el => el.remove());
+
+    const toast = document.createElement("div");
+    toast.className = "auth-toast";
+    toast.setAttribute("role", "status");
+    toast.innerHTML = `
+      <div class="auth-toast-icon" aria-hidden="true">!</div>
+      <div class="auth-toast-body">
+        <strong>${escapeHtml(message.split("\n")[0])}</strong>
+        ${message.includes("\n") ? `<span>${escapeHtml(message.split("\n").slice(1).join(" "))}</span>` : ""}
+      </div>
+      ${actionLabel && actionRoute ? `<button class="auth-toast-action" type="button" data-route="${escapeHtml(actionRoute)}">${escapeHtml(actionLabel)} →</button>` : ""}
+      <button class="auth-toast-close" type="button" aria-label="Close notification">×</button>
+    `;
+
+    document.body.appendChild(toast);
+
+    const timer = setTimeout(() => toast.remove(), duration);
+    toast.querySelector(".auth-toast-close")?.addEventListener("click", () => {
+        clearTimeout(timer);
+        toast.remove();
+    });
+}
+
+function setButtonLoading(button, loading, label) {
+    if (!button) return;
+    if (loading) {
+        button.dataset.originalLabel = button.textContent.trim();
+        button.disabled = true;
+        button.innerHTML = `<span class="btn-spinner" aria-hidden="true"></span>${escapeHtml(label)}`;
+    } else {
+        button.disabled = false;
+        button.textContent = button.dataset.originalLabel || label || "Continue";
+    }
+}
+
 function ensurehabitlyAuth() {
     if (!habitlyAuth) {
         console.error("Habitly habitlyAuth client was not initialized.");
@@ -338,6 +389,19 @@ function renderSignup() {
             "Create a password"
         )}
 
+        <div class="password-strength" id="signup-strength" aria-live="polite">
+          <div class="password-strength-top">
+            <span>Password strength</span>
+            <strong id="signup-strength-label">Waiting for password</strong>
+          </div>
+          <div class="password-strength-bar"><span id="signup-strength-fill"></span></div>
+          <div class="password-rules" id="signup-password-rules">
+            <span data-rule="length">8+ characters</span>
+            <span data-rule="upper">Uppercase letter</span>
+            <span data-rule="number">Number</span>
+          </div>
+        </div>
+
         ${passwordField(
             "signup-confirm",
             "Confirm password",
@@ -419,6 +483,32 @@ function renderSignup() {
       </form>
     `
     });
+
+    updateSignupPasswordStrength();
+}
+
+function updateSignupPasswordStrength() {
+    const input = document.getElementById("signup-password");
+    const label = document.getElementById("signup-strength-label");
+    const fill = document.getElementById("signup-strength-fill");
+    const rules = document.getElementById("signup-password-rules");
+    if (!input || !label || !fill || !rules) return;
+
+    const value = input.value;
+    const checks = {
+        length: value.length >= 8,
+        upper: /[A-Z]/.test(value),
+        number: /[0-9]/.test(value)
+    };
+    const score = Object.values(checks).filter(Boolean).length;
+    Object.entries(checks).forEach(([key, ok]) => {
+        rules.querySelector(`[data-rule="${key}"]`)?.classList.toggle("is-ok", ok);
+    });
+
+    const labels = ["Waiting for password", "Weak", "Fair", "Strong"];
+    label.textContent = labels[score];
+    label.dataset.level = String(score);
+    fill.style.width = `${score * 33.333}%`;
 }
 
 /* =========================================================
@@ -429,55 +519,70 @@ function renderVerify() {
     const email = state.email || "";
 
     view.innerHTML = shell({
-        eyebrow: "CHECK YOUR EMAIL",
+        eyebrow: "VERIFY YOUR EMAIL",
 
         title: `
-      Verify your
-      <span class="accent">email</span>
+      Enter your
+      <span class="accent">verification code</span>
     `,
 
         subtitle: `
-      We've sent a confirmation link to
+      We sent a 6-digit verification code to
       <strong>${escapeHtml(email)}</strong>.
     `,
 
         content: `
-      <div class="form">
+      <form class="form" id="verify-form" novalidate>
 
-        <div class="status" id="verify-status" role="status">
-          Open your email and click the confirmation link to activate your Habitly account.
+        <div class="field">
+          <label for="verify-code">Verification code</label>
+
+          <div class="input-wrap">
+            ${icon("mail")}
+
+            <input
+              class="input"
+              id="verify-code"
+              name="verify-code"
+              type="text"
+              inputmode="numeric"
+              autocomplete="one-time-code"
+              pattern="[0-9]{6}"
+              maxlength="6"
+              placeholder="Enter 6-digit code"
+              aria-describedby="verify-status"
+              required
+            >
+          </div>
         </div>
 
-        <button
-          class="primary-btn"
-          type="button"
-          id="resend"
-        >
-          Resend confirmation email
+        <div class="status" id="verify-status" role="status">
+          Enter the 6-digit code from your Habitly email.
+        </div>
+
+        <button class="primary-btn" type="submit" id="verify-submit">
+          Verify Email
         </button>
 
-        <button
-          class="secondary-btn"
-          type="button"
-          data-route="login"
-        >
-          Back to Sign In
+        <button class="secondary-btn" type="button" id="resend">
+          Resend verification code
         </button>
 
         <p class="bottom-note">
-          Already confirmed your email?
+          Already verified?
 
-          <button
-            class="text-link"
-            type="button"
-            data-route="login"
-          >
+          <button class="text-link" type="button" data-route="login">
             Sign in
           </button>
         </p>
 
-      </div>
+      </form>
     `
+    });
+
+    const codeInput = document.getElementById("verify-code");
+    codeInput?.addEventListener("input", () => {
+        codeInput.value = codeInput.value.replace(/\D/g, "").slice(0, 6);
     });
 }
 
@@ -495,7 +600,7 @@ function renderForgot() {
     `,
 
         subtitle:
-            "Enter your email address and we'll send you a password reset link.",
+            "Enter your email and we'll send recovery instructions if an account is eligible for password recovery.",
 
         content: `
       <form
@@ -685,6 +790,12 @@ function navigate(route) {
 
 document.addEventListener("click", async event => {
 
+    const toastClose = event.target.closest(".auth-toast-close");
+    if (toastClose) {
+        toastClose.closest(".auth-toast")?.remove();
+        return;
+    }
+
     const routeEl = event.target.closest("[data-route]");
 
     if (routeEl) {
@@ -843,7 +954,7 @@ if (google) {
 
             setStatus(
                 "verify-status",
-                error.message
+                friendlyAuthError(error)
             );
 
             resend.disabled = false;
@@ -853,13 +964,21 @@ if (google) {
 
         setStatus(
             "verify-status",
-            "A new confirmation email has been sent. Please check your inbox."
+            "A new verification code has been sent. Please check your inbox."
         );
 
         setTimeout(() => {
             resend.disabled = false;
         }, 30000);
     }
+});
+
+/* =========================================================
+   LIVE PASSWORD STRENGTH
+========================================================= */
+
+document.addEventListener("input", event => {
+    if (event.target?.id === "signup-password") updateSignupPasswordStrength();
 });
 
 /* =========================================================
@@ -907,6 +1026,9 @@ document.addEventListener("submit", async event => {
             return;
         }
 
+        const loginButton = event.target.querySelector('button[type="submit"]');
+        setButtonLoading(loginButton, true, "Signing in...");
+
         const {
             data,
             error
@@ -939,8 +1061,9 @@ document.addEventListener("submit", async event => {
 
             setStatus(
                 "login-status",
-                error.message
+                friendlyAuthError(error)
             );
+            setButtonLoading(loginButton, false);
 
             return;
         }
@@ -1051,6 +1174,9 @@ document.addEventListener("submit", async event => {
         state.name = nameValue;
         state.email = emailValue;
 
+        const signupButton = event.target.querySelector('button[type="submit"]');
+        setButtonLoading(signupButton, true, "Creating account...");
+
         const {
             data,
             error
@@ -1076,26 +1202,45 @@ document.addEventListener("submit", async event => {
 
             setStatus(
                 "signup-status",
-                error.message
+                friendlyAuthError(error)
             );
+            setButtonLoading(signupButton, false);
+
+            if (String(error.message || "").toLowerCase().includes("already registered")) {
+                showToast("This email is already registered.\nTry signing in instead.", {
+                    actionLabel: "Sign In",
+                    actionRoute: "login"
+                });
+            }
 
             return;
         }
 
         /*
-          habitlyAuth may return a user with no session when
-          email confirmation is required.
+          Supabase can intentionally return an obfuscated existing user
+          with an empty identities array. Never send that account to the
+          verification screen. Keep the user on Sign Up and offer Login.
         */
+        if (data?.user && Array.isArray(data.user.identities) && data.user.identities.length === 0) {
+            showToast("This email is already registered.\nTry signing in instead.", {
+                actionLabel: "Sign In",
+                actionRoute: "login"
+            });
+            setStatus(
+                "signup-status",
+                "This email is already registered. Try signing in instead."
+            );
+            setButtonLoading(signupButton, false);
+            document.getElementById("signup-email")?.focus();
+            return;
+        }
 
-        if (data.user) {
-
+        if (data?.user) {
             navigate("verify");
-
             setStatus(
                 "verify-status",
-                `Confirmation email sent to ${emailValue}. Please check your inbox.`
+                `Verification code sent to ${emailValue}. Please check your inbox.`
             );
-
             return;
         }
 
@@ -1103,6 +1248,67 @@ document.addEventListener("submit", async event => {
             "signup-status",
             "Account created. Please check your email to confirm your account."
         );
+    }
+
+    /* =====================================================
+       EMAIL VERIFICATION CODE
+    ===================================================== */
+
+    if (event.target.id === "verify-form") {
+        const codeInput = document.getElementById("verify-code");
+        const submit = document.getElementById("verify-submit");
+        const code = String(codeInput?.value || "").replace(/\D/g, "");
+
+        if (code.length !== 6) {
+            setStatus(
+                "verify-status",
+                "Enter the 6-digit verification code from your email."
+            );
+            return;
+        }
+
+        if (!state.email) {
+            setStatus(
+                "verify-status",
+                "Your verification session has expired. Please sign up again."
+            );
+            return;
+        }
+
+        setButtonLoading(submit, true, "Verifying...");
+        setStatus("verify-status", "Verifying your email...");
+
+        const { data, error } = await habitlyAuth.auth.verifyOtp({
+            email: state.email,
+            token: code,
+            type: "signup"
+        });
+
+        if (error) {
+            console.error("Habitly email verification error:", error);
+            setStatus(
+                "verify-status",
+                friendlyAuthError(error, "Invalid or expired verification code.")
+            );
+            setButtonLoading(submit, false, "Verify Email");
+            return;
+        }
+
+        if (data?.session?.user || data?.user) {
+            setStatus(
+                "verify-status",
+                "Email verified successfully. Opening Habitly..."
+            );
+            // Supabase emits SIGNED_IN. The parent auth gate owns navigation.
+            return;
+        }
+
+        setStatus(
+            "verify-status",
+            "Verification completed. Please sign in to continue."
+        );
+        setButtonLoading(submit, false, "Verify Email");
+        return;
     }
 
     /* =====================================================
@@ -1128,6 +1334,8 @@ document.addEventListener("submit", async event => {
         }
 
         state.email = emailValue;
+        const forgotButton = event.target.querySelector('button[type="submit"]');
+        setButtonLoading(forgotButton, true, "Sending...");
 
         const {
             error
@@ -1145,16 +1353,18 @@ document.addEventListener("submit", async event => {
 
             setStatus(
                 "forgot-status",
-                error.message
+                friendlyAuthError(error)
             );
+            setButtonLoading(forgotButton, false);
 
             return;
         }
 
         setStatus(
             "forgot-status",
-            "Password reset email sent. Check your inbox and follow the link."
+            "If this email is eligible for recovery, we've sent password reset instructions. Check your inbox."
         );
+        setButtonLoading(forgotButton, false);
     }
 
     /* =====================================================
@@ -1209,6 +1419,9 @@ document.addEventListener("submit", async event => {
             return;
         }
 
+        const resetButton = event.target.querySelector('button[type="submit"]');
+        setButtonLoading(resetButton, true, "Updating...");
+
         const {
             error
         } = await habitlyAuth.auth.updateUser({
@@ -1221,8 +1434,9 @@ document.addEventListener("submit", async event => {
 
             setStatus(
                 "reset-status",
-                error.message
+                friendlyAuthError(error)
             );
+            setButtonLoading(resetButton, false);
 
             return;
         }
