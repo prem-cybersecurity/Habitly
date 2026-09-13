@@ -1059,10 +1059,27 @@ document.addEventListener("submit", async event => {
                 return;
             }
 
+            const loginErrorMessage = friendlyAuthError(error);
+
             setStatus(
                 "login-status",
-                friendlyAuthError(error)
+                loginErrorMessage
             );
+
+            // Supabase intentionally does not reveal whether an arbitrary email
+            // exists, so we must not claim "No account found" from an invalid
+            // login response. Offer the safe, useful next step instead.
+            if (String(error.message || "").toLowerCase().includes("invalid login credentials")) {
+                showToast(
+                    "Email or password is incorrect.\nNew to Habitly? Create an account.",
+                    {
+                        actionLabel: "Create Account",
+                        actionRoute: "signup",
+                        duration: 9000
+                    }
+                );
+            }
+
             setButtonLoading(loginButton, false);
 
             return;
@@ -1343,7 +1360,7 @@ document.addEventListener("submit", async event => {
             emailValue,
             {
                 redirectTo:
-                    `${window.location.origin}/auth/index.html#reset`
+                    `${window.location.origin}/auth/index.html?route=reset`
             }
         );
 
@@ -1461,38 +1478,36 @@ async function initializeAuth() {
 
     if (!ensurehabitlyAuth()) return;
 
-    const {
-        data: {
-            session
-        }
-    } = await habitlyAuth.auth.getSession();
-
-    const hash =
-        window.location.hash;
+    const hash = window.location.hash;
+    const queryRoute = new URLSearchParams(window.location.search).get("route");
+    const isRecoveryUrl =
+        hash.includes("access_token") ||
+        hash.includes("type=recovery") ||
+        queryRoute === "reset";
 
     /*
-      Password recovery:
-      habitlyAuth sends the user back with a recovery session.
+      Supabase may need a moment to consume the recovery tokens from the URL.
+      Do not navigate to #reset before a recovery session exists because that
+      would replace the token-bearing URL fragment.
     */
+    let { data: { session } } = await habitlyAuth.auth.getSession();
 
-    if (
-        hash.includes("access_token") ||
-        hash.includes("type=recovery")
-    ) {
+    if (isRecoveryUrl && !session?.user) {
+        await new Promise(resolve => setTimeout(resolve, 250));
+        ({ data: { session } } = await habitlyAuth.auth.getSession());
+    }
 
-        navigate("reset");
-
+    if (isRecoveryUrl) {
+        if (session?.user) {
+            navigate("reset");
+        } else {
+            announce("Your password recovery link is invalid or expired. Please request a new one.");
+            navigate("forgot");
+        }
         return;
     }
 
-    /*
-      If the user already has a valid session,
-      notify the main Habitly application.
-    */
-
     if (session?.user) {
-        // The parent window already received INITIAL_SESSION/SIGNED_IN from
-        // Supabase. Do not emit a second success event from the iframe.
         return;
     }
 

@@ -2,7 +2,7 @@
    Dashboard / Habits / Goals / Calendar / Statistics
 */
 const AS = 'assets/';
-const APP_VERSION = '3.9.7';
+const APP_VERSION = '4.2.1';
 const ROUTES = ['dashboard', 'habits', 'goals', 'calendar', 'statistics', 'settings'];
 const STORAGE = 'habitly.final.v2';
 const USER_STORAGE_PREFIX = 'habitly.final.v3.user.';
@@ -106,6 +106,23 @@ let calendarSelectedDate = todayISO();
 
 function clone(v) { return JSON.parse(JSON.stringify(v)); }
 function userStorageKey(userId) { return USER_STORAGE_PREFIX + String(userId || 'guest').replace(/[^a-zA-Z0-9_-]/g, '_'); }
+const SAVED_ACCOUNTS_KEY = 'habitly.saved.accounts.v1';
+function savedAccounts() { try { const v=JSON.parse(localStorage.getItem(SAVED_ACCOUNTS_KEY)||'[]'); return Array.isArray(v)?v.filter(x=>x&&x.userId&&x.email&&x.access_token&&x.refresh_token):[]; } catch (_) { return []; } }
+function saveAccountSession(session) { const u=session?.user; if(!u?.id||!u.email||!session.access_token||!session.refresh_token) return; const list=savedAccounts().filter(x=>x.userId!==u.id); list.unshift({userId:u.id,email:u.email,name:u.user_metadata?.full_name||u.user_metadata?.name||u.email.split('@')[0],avatar:state?.profile?.avatar||'',access_token:session.access_token,refresh_token:session.refresh_token,updatedAt:Date.now()}); localStorage.setItem(SAVED_ACCOUNTS_KEY,JSON.stringify(list.slice(0,5))); }
+function removeSavedAccount(userId) { localStorage.setItem(SAVED_ACCOUNTS_KEY,JSON.stringify(savedAccounts().filter(x=>x.userId!==userId))); }
+function accountInitials(a) { return String(a?.name||a?.email||'?').trim().split(/\s+/).map(x=>x[0]).slice(0,2).join('').toUpperCase(); }
+function savedAccountAvatar(a) { try { const raw=localStorage.getItem(userStorageKey(a.userId)); const saved=raw?JSON.parse(raw):null; return saved?.profile?.avatar || a?.avatar || ''; } catch (_) { return a?.avatar || ''; } }
+function accountSwitchModal() {
+  const active=currentAuthUser?.id||''; const accounts=savedAccounts();
+  const rows=accounts.map(a=>{ const av=savedAccountAvatar(a); return `<div class="saved-account-row ${a.userId===active?'active':''}"><button type="button" class="saved-account-main" data-switch-user="${esc(a.userId)}" aria-label="Switch to ${esc(a.name||a.email)}"><span class="saved-account-avatar">${av?`<img src="${esc(av)}" alt="">`:`<span>${esc(accountInitials(a))}</span>`}</span><span><b>${esc(a.name||a.email)}</b><small>${esc(a.email)}</small></span><strong>${a.userId===active?'✓':''}</strong></button><button type="button" class="saved-account-remove" data-remove-saved-user="${esc(a.userId)}" aria-label="Remove saved account ${esc(a.email)}" title="Remove saved account">×</button></div>`; }).join('');
+  modal('Switch account',`${esc(state.profile?.name||'Account')} · ${esc(state.profile?.email||currentAuthUser?.email||'')}`,`<div class="account-switch-list">${rows||'<div class="muted-copy">No saved accounts yet.</div>'}</div><div class="account-switch-actions"><button type="button" class="secondary-btn" id="viewHabitlyProfile">View profile & settings</button><button type="button" class="add-account-btn" id="addHabitlyAccount">＋ Add account</button></div><p class="settings-note">Passwords are never stored. Saved accounts use browser session tokens. On shared computers, remove saved accounts after use.</p>`);
+  document.querySelectorAll('[data-switch-user]').forEach(b=>b.addEventListener('click',()=>switchSavedAccount(b.dataset.switchUser)));
+  document.querySelectorAll('[data-remove-saved-user]').forEach(b=>b.addEventListener('click',e=>{ e.preventDefault(); e.stopPropagation(); removeSavedAccount(b.dataset.removeSavedUser); accountSwitchModal(); toast('Saved account removed'); }));
+  document.getElementById('viewHabitlyProfile')?.addEventListener('click',()=>{ closeModal(); navigate('settings'); });
+  document.getElementById('addHabitlyAccount')?.addEventListener('click',()=>{ closeModal(); if (typeof window.habitlyShowLogin === 'function') window.habitlyShowLogin(); else location.hash='#/login'; toast('Sign in with another account'); });
+}
+async function switchSavedAccount(userId) { const a=savedAccounts().find(x=>x.userId===userId); const sb=window.habitlySupabase; if(!a||!sb) return; try { const {data,error}=await sb.auth.setSession({access_token:a.access_token,refresh_token:a.refresh_token}); if(error) throw error; if(data?.session) saveAccountSession(data.session); closeModal(); toast('Switching account…'); } catch(e) { removeSavedAccount(userId); toast('Saved session expired. Please sign in again.'); accountSwitchModal(); } }
+
 function freshUserState(user) {
   const fresh = clone(defaultState);
   fresh.habits = fresh.habits.map(h => ({ ...h, current: 0, daily: {} }));
@@ -188,7 +205,9 @@ function mergeState(saved, options = {}) {
   merged.reminders = merged.reminders.filter(r => r && r.source === 'manual');
   return merged;
 }
-function buildSnapshot(s, date) { return { date, habits: (s.habits || []).map(h => { const current = Math.max(0, Number((h.daily || {})[date] ?? 0) || 0), target = Math.max(1, Number(h.target) || 1); return { id: h.id, name: h.name, emoji: h.emoji || '', category: h.category, paused: !!h.paused, target, unit: h.unit || '', current, percent: Math.min(100, Math.round(current / target * 100)) }; }) }; }
+function habitScheduledOnDate(h, date) { if (!h || h.frequency !== 'Selected Days') return true; const d=new Date(String(date)+'T12:00:00'); if(Number.isNaN(d.getTime())) return true; const days=Array.isArray(h.selectedDays)?h.selectedDays.map(Number).filter(n=>n>=0&&n<=6):[]; return days.length ? days.includes(d.getDay()) : false; }
+function selectedDaysLabel(days) { const names=['Sun','Mon','Tue','Wed','Thu','Fri','Sat']; const d=(Array.isArray(days)?days:[]).map(Number).filter(n=>n>=0&&n<=6); return d.length===7?'Every day':d.sort((a,b)=>a-b).map(n=>names[n]).join(', '); }
+function buildSnapshot(s, date) { return { date, habits: (s.habits || []).map(h => { const current = Math.max(0, Number((h.daily || {})[date] ?? 0) || 0), target = Math.max(1, Number(h.target) || 1); return { id: h.id, name: h.name, emoji: h.emoji || '', category: h.category, paused: !!h.paused, frequency:h.frequency||'Daily', selectedDays:Array.isArray(h.selectedDays)?h.selectedDays.slice():undefined, target, unit: h.unit || '', current, percent: Math.min(100, Math.round(current / target * 100)) }; }) }; }
 function captureActivitySnapshot(s, date) { s.activityHistory = s.activityHistory || {}; const snap = buildSnapshot(s, date); const meaningful = snap.habits.some(h => h.current > 0); if (meaningful || s.activityHistory[date]) s.activityHistory[date] = snap; }
 function normalizeFitnessGoal(g) {
   if (!g || g.type !== 'fitness') return g;
@@ -338,6 +357,9 @@ function normalizeState(s) {
     const rawToday = habit.daily[today];
     habit.current = Number.isFinite(Number(rawToday)) ? Math.max(0, Number(rawToday)) : 0;
     if (Number.isFinite(Number(habit.target))) habit.target = Math.max(1, Number(habit.target));
+    habit.frequency = habit.frequency === 'Selected Days' ? 'Selected Days' : 'Daily';
+    habit.selectedDays = habit.frequency === 'Selected Days' ? [...new Set((Array.isArray(habit.selectedDays)?habit.selectedDays:[]).map(Number).filter(n=>Number.isInteger(n)&&n>=0&&n<=6))].sort((a,b)=>a-b) : [0,1,2,3,4,5,6];
+    if (habit.frequency === 'Selected Days' && !habit.selectedDays.length) habit.selectedDays=[0,1,2,3,4,5,6];
     return habit;
   });
 
@@ -556,14 +578,14 @@ function touchChangedRecords(previous, current) {
     const prevMap = new Map((previous?.[key] || []).map(x => [x.id, x]));
     for (const item of current?.[key] || []) {
       const before = prevMap.get(item.id);
-      const strip = x => { if (!x) return x; const copy = clone(x); delete copy.updatedAt; return copy; };
+      const strip = x => { if (!x) return x; const { updatedAt, ...copy } = x; return copy; };
       if (!before || JSON.stringify(strip(before)) !== JSON.stringify(strip(item))) item.updatedAt = now;
     }
   }
   for (const key of ['profile', 'settings']) {
     if (!current?.[key]) continue;
     const before = previous?.[key];
-    const strip = x => { if (!x) return x; const copy = clone(x); delete copy.updatedAt; return copy; };
+    const strip = x => { if (!x) return x; const { updatedAt, ...copy } = x; return copy; };
     if (!before || JSON.stringify(strip(before)) !== JSON.stringify(strip(current[key]))) current[key].updatedAt = now;
   }
   if (current?.habits) {
@@ -689,7 +711,7 @@ function mergeForDriveUpload(remoteState, localState, dirtyOverride = syncDirty,
 
 function save(options = {}) {
   try {
-    const before = syncLastSavedSnapshot ? createSyncSnapshot(syncLastSavedSnapshot) : null;
+    const before = syncLastSavedSnapshot || null;
     touchChangedRecords(before, state);
     captureActivitySnapshot(state, todayISO());
     const afterSnapshot = createSyncSnapshot(state);
@@ -939,7 +961,7 @@ async function flushCloudSync() {
   if (!cloudStorageSelected() || !currentAuthUser?.id || !navigator.onLine) return false;
   if (cloudSyncBusy) { cloudSyncQueued = true; return false; }
   if (!pendingMutations(state).length) { cloudSyncPending = false; return true; }
-  cloudSyncBusy = true; cloudSyncPending = true;
+  cloudSyncBusy = true; cloudSyncPending = true; refreshCloudStatusUI();
   const flushGeneration = syncGeneration;
   try {
     let remote = await fetchCloudDocument();
@@ -1012,7 +1034,7 @@ async function flushCloudSync() {
         if (cloudSyncPending) cloudSyncQueued = true;
       }
       cloudSyncLastAt = Date.now();
-      cloudSyncError = '';
+      cloudSyncError = ''; refreshCloudStatusUI();
       // Drive is a backup of the acknowledged cloud state. Never let a
       // delayed Drive upload race ahead of the primary synchronization layer.
       if (cloudSyncPending === false && driveStorageSelected()) scheduleDriveBackup();
@@ -1022,17 +1044,18 @@ async function flushCloudSync() {
     return !cloudSyncPending;
   } catch (e) {
     cloudSyncError = e?.message || 'Cloud synchronization failed';
+    refreshCloudStatusUI();
     cloudSyncPending = pendingMutations(state).length > 0;
     return false;
   } finally {
-    cloudSyncBusy = false;
+    cloudSyncBusy = false; refreshCloudStatusUI();
     if (cloudSyncQueued) { cloudSyncQueued = false; queueMicrotask(scheduleCloudSync); }
   }
 }
 function scheduleCloudSync() {
   if (!cloudStorageSelected() || !navigator.onLine) { cloudSyncPending = pendingMutations(state).length > 0; return; }
   clearTimeout(cloudSyncTimer);
-  cloudSyncTimer = setTimeout(() => flushCloudSync().catch(() => {}), 80);
+  cloudSyncTimer = setTimeout(() => flushCloudSync().catch(() => {}), 350);
 }
 async function initializeCloudSync() {
   if (!cloudStorageSelected()) return;
@@ -1092,7 +1115,7 @@ function startCloudPolling() {
   window.__habitlyCloudPoll = setInterval(() => {
     if (!cloudStorageSelected() || !navigator.onLine || cloudSyncBusy) return;
     const now = Date.now();
-    const interval = cloudRealtimeReady ? 3000 : 1000;
+    const interval = cloudRealtimeReady ? 15000 : 5000;
     if (now - cloudLastSafetyPollAt < interval) return;
     cloudLastSafetyPollAt = now;
     fetchCloudDocument().then(row => {
@@ -1101,7 +1124,7 @@ function startCloudPolling() {
         if (pendingMutations(state).length) scheduleCloudSync();
       }).catch(() => {});
     }).catch(() => {});
-  }, 1000);
+  }, 5000);
 }
 function driveStorageSelected() {
   // Drive connection is optional. It can receive a backup from either local or
@@ -1627,7 +1650,15 @@ function startReminderService() {
   clearTimeout(headerClockTimer);
   headerClockTimer = null;
   clearTimeout(reminderSchedulerTimer);
-  reminderUiTimer = setInterval(() => { checkReminderNotifications(); refreshReminderUi(); }, 10000);
+  reminderUiTimer = setInterval(() => {
+    checkReminderNotifications();
+    if (document.visibilityState === 'visible') {
+      const popover = document.getElementById('reminderPopover');
+      const calendarList = document.getElementById('calendarReminderList');
+      if (popover && !popover.classList.contains('hidden')) refreshReminderPopover();
+      if (calendarList) { calendarList.innerHTML = reminderOverviewMarkup(calendarSelectedDate); bindReminderControls(calendarList); }
+    }
+  }, 30000);
   checkReminderNotifications(true);
   scheduleNextReminderCheck();
 }
@@ -1681,8 +1712,8 @@ function avatarMarkup(sizeClass = '') { const p = state.profile || {}; const ini
 
 const navItems = [['dashboard', 'Dashboard', 'dashboard'], ['habits', 'Habits', 'target'], ['goals', 'Goals', 'trophy'], ['calendar', 'Calendar', 'calendar'], ['statistics', 'Statistics', 'chart'], ['settings', 'Settings', 'settings']];
 function navIcon(name) { const map = { dashboard: '▦', target: '🎯', trophy: '🏆', chart: '📊' }; return ['calendar', 'settings'].includes(name) ? icon(name) : `<span class="emoji-nav">${map[name] || '•'}</span>`; }
-function sidebar(route) { return `<aside class="sidebar"><div class="brand">${logo()}<span class="brand-name">Habitly</span></div><nav class="main-nav" aria-label="Main navigation">${navItems.map(([r, t, i]) => `<button class="nav-item ${route === r ? 'active' : ''}" data-route="${r}"><span class="nav-icon">${navIcon(i)}</span><span>${t}</span></button>`).join('')}</nav><div class="sidebar-bottom"><button class="profile-card" data-route="settings" aria-label="Open account settings"><span class="avatar">${avatarMarkup()}</span><span class="profile-copy"><strong>${esc(state.profile?.name || 'Prem Kumar')}</strong><small>View profile</small></span><span class="chevron">${icon('chevron')}</span></button><button class="logout" type="button" data-logout aria-label="Log out of Habitly">${icon('logout')}<span>Log out</span></button></div></aside>`; }
-function mobileDrawer(route) { return `<div class="mobile-drawer" id="drawer" aria-hidden="true"><div class="scrim" data-close-drawer></div><aside class="drawer"><div class="drawer-head"><div class="mobile-brand">${logo()}<strong>Habitly</strong></div><button class="drawer-close" data-close-drawer aria-label="Close menu">×</button></div><nav class="main-nav">${navItems.map(([r, t, i]) => `<button class="nav-item ${route === r ? 'active' : ''}" data-route="${r}"><span class="nav-icon">${navIcon(i)}</span><span>${t}</span></button>`).join('')}</nav><div class="sidebar-bottom"><button class="profile-card" data-route="settings" aria-label="Open account settings"><span class="avatar">${avatarMarkup()}</span><span class="profile-copy"><strong>${esc(state.profile?.name || 'Prem Kumar')}</strong><small>View profile</small></span><span class="chevron">${icon('chevron')}</span></button><button class="logout" type="button" data-logout aria-label="Log out of Habitly">${icon('logout')}<span>Log out</span></button></div></aside></div>`; }
+function sidebar(route) { return `<aside class="sidebar"><div class="brand">${logo()}<span class="brand-name">Habitly</span></div><nav class="main-nav" aria-label="Main navigation">${navItems.map(([r, t, i]) => `<button class="nav-item ${route === r ? 'active' : ''}" data-route="${r}"><span class="nav-icon">${navIcon(i)}</span><span>${t}</span></button>`).join('')}</nav><div class="sidebar-bottom"><button class="profile-card" data-account-switch aria-label="Switch account" title="Switch account"><span class="avatar">${avatarMarkup()}</span><span class="profile-copy"><strong>${esc(state.profile?.name || 'Prem Kumar')}</strong><small>View profile</small></span><span class="chevron">${icon('chevron')}</span></button><button class="logout" type="button" data-logout aria-label="Log out of Habitly">${icon('logout')}<span>Log out</span></button></div></aside>`; }
+function mobileDrawer(route) { return `<div class="mobile-drawer" id="drawer" aria-hidden="true"><div class="scrim" data-close-drawer></div><aside class="drawer"><div class="drawer-head"><div class="mobile-brand">${logo()}<strong>Habitly</strong></div><button class="drawer-close" data-close-drawer aria-label="Close menu">×</button></div><nav class="main-nav">${navItems.map(([r, t, i]) => `<button class="nav-item ${route === r ? 'active' : ''}" data-route="${r}"><span class="nav-icon">${navIcon(i)}</span><span>${t}</span></button>`).join('')}</nav><div class="sidebar-bottom"><button class="profile-card" data-account-switch aria-label="Switch account" title="Switch account"><span class="avatar">${avatarMarkup()}</span><span class="profile-copy"><strong>${esc(state.profile?.name || 'Prem Kumar')}</strong><small>View profile</small></span><span class="chevron">${icon('chevron')}</span></button><button class="logout" type="button" data-logout aria-label="Log out of Habitly">${icon('logout')}<span>Log out</span></button></div></aside></div>`; }
 
 function reminderOverviewMarkup(date) {
   const selectedDate = String(date || calendarSelectedDate || todayISO());
@@ -1930,13 +1961,15 @@ function reminderPanel() {
   </div>`;
 }
 
-function topActions() { return `<div class="top-actions"><button class="action-icon reminder" aria-label="Reminders" data-reminders>${icon('bell')}<span class="badge">${eventNotificationCount()}</span></button><div class="date">${icon('calendar')}<span class="today-label"></span><span class="today-time"></span></div><button class="profile-mini" data-route="settings" aria-label="Account settings">${avatarMarkup()}</button><button class="profile-chevron" data-route="settings" aria-label="Account settings">${icon('chevron')}</button></div>`; }
+function refreshCloudStatusUI(){ document.querySelectorAll('.sync-pill').forEach(el=>{ const err=!!cloudSyncError; el.classList.toggle('error',err); el.textContent=err?'⚠ Sync issue':cloudSyncPending?'↻ Syncing…':'✓ Synced'; }); document.querySelectorAll('.backup-status-line').forEach(el=>{ if(el.closest('.drive-backup-card')) return; el.innerHTML=`${icon(cloudSyncError?'info':'check')}<span>${esc(cloudStatusText())}</span>`; el.classList.toggle('waiting',!!cloudSyncError||cloudSyncPending); el.classList.toggle('ready',!cloudSyncError&&!cloudSyncPending); }); }
+function topActions() { return `<div class="top-actions"><span class="sync-pill ${cloudSyncError?'error':''}">${cloudSyncError?'⚠ Sync issue':cloudSyncPending?'↻ Syncing…':'✓ Synced'}</span><button class="action-icon reminder" aria-label="Reminders" data-reminders>${icon('bell')}<span class="badge">${eventNotificationCount()}</span></button><div class="date">${icon('calendar')}<span class="today-label"></span><span class="today-time"></span></div><button class="profile-mini" data-account-switch aria-label="Switch account" title="Switch account">${avatarMarkup()}</button><button class="profile-chevron" data-account-switch aria-label="Switch account" title="Switch account">${icon('chevron')}</button></div>`; }
 function mobileHeader() { const standalone = window.matchMedia?.('(display-mode: standalone)').matches || window.navigator.standalone === true; return `<div class="mobile-header"><button class="hamburger" id="menuToggle" aria-label="Open menu">${icon('menu')}</button><div class="mobile-brand">${logo()}<strong>Habitly</strong></div><div class="mobile-actions"><button class="action-icon reminder" data-reminders aria-label="Reminders" title="Reminders">${icon('bell')}<span class="badge">${eventNotificationCount()}</span></button>${standalone ? '' : `<button class="action-icon install-mobile" data-install-app aria-label="Install Habitly" title="Install Habitly">${icon('download')}</button>`}<button class="action-icon" data-route="calendar" aria-label="Calendar" title="Calendar">${icon('calendar')}</button><button class="profile-mini" data-route="settings" aria-label="Open account settings">${avatarMarkup()}</button></div></div>`; }
 function shell(route, content) { return `<div class="app-shell">${sidebar(route)}<main class="main-content page-${route}">${mobileHeader()}<div class="desktop-top">${topActions()}</div>${content}</main>${mobileDrawer(route)}${reminderPanel()}</div>`; }
 function greeting(sub = 'Stay consistent, the results will follow.') { const hour = new Date().getHours(); const text = hour >= 5 && hour < 12 ? 'Good morning' : hour >= 12 && hour < 17 ? 'Good afternoon' : hour >= 17 && hour < 21 ? 'Good evening' : 'Good night'; const name = esc(state.profile?.name || currentAuthUser?.user_metadata?.name || currentAuthUser?.email?.split('@')[0] || 'there'); return `<header class="greeting"><h1>${text}, <span>${name}!</span> <b>👋</b></h1><p>${sub}</p></header>`; }
 function refreshGreeting() { const h = document.querySelector('.greeting h1'); if (!h) return; const hour = new Date().getHours(); const text = hour >= 5 && hour < 12 ? 'Good morning' : hour >= 12 && hour < 17 ? 'Good afternoon' : hour >= 17 && hour < 21 ? 'Good evening' : 'Good night'; const name = esc(state.profile?.name || currentAuthUser?.user_metadata?.name || currentAuthUser?.email?.split('@')[0] || 'there'); h.innerHTML = `${text}, <span>${name}!</span> <b>👋</b>`; }
 
 function habitIconClass(h) { return 'habit-icon'; }
+function habitStreak(h) { let run=0, d=new Date(todayISO()+'T12:00:00'); for(let i=0;i<366;i++){const iso=dateISO(d); if(!habitScheduledOnDate(h,iso)) { d.setDate(d.getDate()-1); continue; } const snap=state.activityHistory?.[iso]; const rec=snap?.habits?.find(x=>x.id===h.id); if(!rec || Number(rec.percent)<=0) break; run++; d.setDate(d.getDate()-1);} return run; }
 function habitRow(h, opts = {}) {
   const p = pct(h);
   const done = h.type === 'yesno' ? Number(h.current) >= 1 : p >= 100;
@@ -1946,7 +1979,7 @@ function habitRow(h, opts = {}) {
   const target = isYesNo ? 1 : Math.max(1, Number(h.target) || 1);
   return `<article class="habit-row ${compact ? 'compact' : ''} ${h.paused ? 'is-paused' : ''}" data-id="${h.id}" data-category="${esc(h.category)}">
     <div class="habit-icon">${esc(h.emoji || '')}</div>
-    <div class="habit-name"><strong>${esc(h.name)}</strong><small>${isYesNo ? 'Yes / No' : `${esc(target)} ${esc(h.unit || 'times')} a day`}${h.paused ? ' · Paused' : ''}</small></div>
+    <div class="habit-name"><strong>${esc(h.name)}</strong><small>${isYesNo ? 'Yes / No' : `${esc(target)} ${esc(h.unit || 'times')} a day`}${h.frequency==='Selected Days' ? ` · ${esc(selectedDaysLabel(h.selectedDays))}` : ''}${h.paused ? ' · Paused' : ''}${habitStreak(h)>0 ? ` · 🔥 ${habitStreak(h)}d streak` : ''}</small></div>
     <div class="habit-progress">
       ${isYesNo ? `<div class="yesno-controls"><button type="button" class="yesno-choice ${done ? 'selected' : ''}" ${h.paused ? 'disabled' : ''} data-habit-action="yes" aria-pressed="${done}">Yes</button><button type="button" class="yesno-choice ${!done ? 'selected' : ''}" ${h.paused ? 'disabled' : ''} data-habit-action="no" aria-pressed="${!done}">No</button></div>` : `<div class="quantity-controls"><button class="qty-btn" ${h.paused ? 'disabled' : ''} data-habit-action="minus" aria-label="Decrease ${esc(h.name)}">${icon('minus')}</button><span class="qty-value">${esc(current)} / ${esc(target)} ${esc(h.unit || 'times')}</span><button class="qty-btn" ${h.paused ? 'disabled' : ''} data-habit-action="plus" aria-label="Increase ${esc(h.name)}">${icon('plus')}</button></div>`}
       <div class="progress-track"><i style="width:${p}%"></i></div>
@@ -1957,7 +1990,7 @@ function habitRow(h, opts = {}) {
   </article>`;
 }
 
-function dashboard() { const habits = state.habits.filter(h => !h.paused), total = habits.length, avg = dailyProgress(todayISO()), completed = habits.filter(h => pct(h) >= 100).length, weekly = weeklyActivityData(new Date()), recorded = weekly.filter(x => x.value !== null), weekAvg = recorded.length ? Math.round(recorded.reduce((a, x) => a + x.value, 0) / recorded.length) : 0; return shell('dashboard', `${greeting()}<section class="stats-grid dashboard-stats"><article class="stat-card"><div class="progress-ring" style="--p:${avg}%"><span>${avg}%</span></div><h2>Today's Progress</h2><p>${avg >= 75 ? 'Great going!' : 'Keep building!'}</p></article><article class="stat-card"><div class="stat-emoji fire">🔥</div><div class="big-number">${currentStreak()}</div><h2>Current Streak</h2><p>days</p></article><article class="stat-card"><div class="stat-emoji trophy">🏆</div><div class="big-number">${bestStreak()}</div><h2>Best Streak</h2><p>days</p></article><article class="stat-card"><div class="stat-emoji check">✓</div><div class="big-number">${completed}</div><h2>Completed Today</h2><p>out of ${total}</p></article><article class="stat-card"><div class="stat-emoji trend">↗</div><div class="big-number">${weekAvg}%</div><h2>Consistency</h2><p>This week</p></article></section><section class="dashboard-grid"><article class="panel habits-panel"><div class="panel-header"><div><h2>Today's Habits</h2><div class="filters" data-filter-group="dashboard"><button class="filter active" data-filter="All">All</button><button class="filter" data-filter="Health">Health</button><button class="filter" data-filter="Fitness">Fitness</button><button class="filter" data-filter="Study">Study</button><button class="filter" data-filter="Personal">Personal</button><button class="filter" data-filter="Mindfulness">Mindfulness</button></div></div><button class="primary-btn" data-open-habit>+ Add Habit</button></div><div class="habit-list" id="dashboardHabits">${habits.map(h => habitRow(h)).join('')}</div><button class="view-link" data-route="habits">View all habits →</button></article><div class="right-column"><article class="panel weekly-panel"><div class="panel-title-row"><div><h2>Weekly Activity</h2><p class="panel-subtitle">Actual recorded completion this week</p></div><span class="week-total">${weekAvg}%</span></div><div class="activity-chart" id="dashboardWeeklyChart">${weekly.map(x => `<div class="activity-day ${x.value === null ? 'future' : ''}"><span class="bar-value">${x.value === null ? '' : x.value + '%'}</span><div class="bar"><i style="height:${x.value === null ? 0 : x.value}%"></i></div><b>${x.label}</b></div>`).join('')}</div></article></div></section>`); }
+function dashboard() { const habits = state.habits.filter(h => !h.paused && habitScheduledOnDate(h, todayISO())), total = habits.length, avg = dailyProgress(todayISO()), completed = habits.filter(h => pct(h) >= 100).length, weekly = weeklyActivityData(new Date()), recorded = weekly.filter(x => x.value !== null), weekAvg = recorded.length ? Math.round(recorded.reduce((a, x) => a + x.value, 0) / recorded.length) : 0; return shell('dashboard', `${greeting()}<section class="stats-grid dashboard-stats"><article class="stat-card"><div class="progress-ring" style="--p:${avg}%"><span>${avg}%</span></div><h2>Today's Progress</h2><p>${avg >= 75 ? 'Great going!' : 'Keep building!'}</p></article><article class="stat-card"><div class="stat-emoji fire">🔥</div><div class="big-number">${currentStreak()}</div><h2>Current Streak</h2><p>days</p></article><article class="stat-card"><div class="stat-emoji trophy">🏆</div><div class="big-number">${bestStreak()}</div><h2>Best Streak</h2><p>days</p></article><article class="stat-card"><div class="stat-emoji check">✓</div><div class="big-number">${completed}</div><h2>Completed Today</h2><p>out of ${total}</p></article><article class="stat-card"><div class="stat-emoji trend">↗</div><div class="big-number">${weekAvg}%</div><h2>Consistency</h2><p>This week</p></article></section><section class="dashboard-grid"><article class="panel habits-panel"><div class="panel-header"><div><h2>Today's Habits</h2><div class="filters" data-filter-group="dashboard"><button class="filter active" data-filter="All">All</button><button class="filter" data-filter="Health">Health</button><button class="filter" data-filter="Fitness">Fitness</button><button class="filter" data-filter="Study">Study</button><button class="filter" data-filter="Personal">Personal</button><button class="filter" data-filter="Mindfulness">Mindfulness</button></div></div><button class="primary-btn" data-open-habit>+ Add Habit</button></div><div class="habit-list" id="dashboardHabits">${habits.map(h => habitRow(h)).join('')}</div><button class="view-link" data-route="habits">View all habits →</button></article><div class="right-column"><article class="panel weekly-panel"><div class="panel-title-row"><div><h2>Weekly Activity</h2><p class="panel-subtitle">Actual recorded completion this week</p></div><span class="week-total">${weekAvg}%</span></div><div class="activity-chart" id="dashboardWeeklyChart">${weekly.map(x => `<div class="activity-day ${x.value === null ? 'future' : ''}"><span class="bar-value">${x.value === null ? '' : x.value + '%'}</span><div class="bar"><i style="height:${x.value === null ? 0 : x.value}%"></i></div><b>${x.label}</b></div>`).join('')}</div></article></div></section>`); }
 
 function habitsPage() {
   const avg = Math.round(state.habits.reduce((a, h) => a + pct(h), 0) / Math.max(1, state.habits.length));
@@ -2035,16 +2068,17 @@ function calendarPage() { return shell('calendar', `<div class="page-title calen
 function pctForDate(d) { return calendarPercentForDay(d); }
 function dateISO(d) { return new Date(d.getFullYear(), d.getMonth(), d.getDate(), 12).toISOString().slice(0, 10); }
 function snapshotForDate(date) { const iso = typeof date === 'string' ? date : dateISO(date); return state.activityHistory?.[iso] || null; }
-function dailyProgress(date) { const snap = snapshotForDate(date); if (!snap || !snap.habits.length) return 0; const active = snap.habits.filter(h => !h.paused); if (!active.length) return 0; return Math.round(active.reduce((a, h) => a + Math.max(0, Math.min(100, Number(h.percent) || 0)), 0) / active.length); }
-function dailyCounts(date) { const snap = snapshotForDate(date); if (!snap || !snap.habits.length) return { completed: 0, partial: 0, notDone: 0, total: 0 }; const active = snap.habits.filter(h => !h.paused), completed = active.filter(h => h.percent >= 100).length, partial = active.filter(h => h.percent > 0 && h.percent < 100).length; return { completed, partial, notDone: Math.max(0, active.length - completed - partial), total: active.length }; }
+function dailyProgress(date) { const iso = typeof date === 'string' ? date : dateISO(date); const snap = snapshotForDate(iso); if (!snap || !snap.habits.length) return 0; const active = snap.habits.filter(h => !h.paused && habitScheduledOnDate(h, iso)); if (!active.length) return 0; return Math.round(active.reduce((a, h) => a + Math.max(0, Math.min(100, Number(h.percent) || 0)), 0) / active.length); }
+function dailyCounts(date) { const iso = typeof date === 'string' ? date : dateISO(date); const snap = snapshotForDate(iso); if (!snap || !snap.habits.length) return { completed: 0, partial: 0, notDone: 0, total: 0 }; const active = snap.habits.filter(h => !h.paused && habitScheduledOnDate(h, iso)), completed = active.filter(h => h.percent >= 100).length, partial = active.filter(h => h.percent > 0 && h.percent < 100).length; return { completed, partial, notDone: Math.max(0, active.length - completed - partial), total: active.length }; }
 function weekStartIndex() { return (state.settings?.habits?.weekStarts || 'Sunday') === 'Monday' ? 1 : 0; }
 function weekBounds(cursor) { const start = new Date(cursor); start.setHours(12, 0, 0, 0); const offset = (start.getDay() - weekStartIndex() + 7) % 7; start.setDate(start.getDate() - offset); return { start, days: Array.from({ length: 7 }, (_, i) => { const d = new Date(start); d.setDate(start.getDate() + i); return d; }) }; } function weekView(cursor) { const { days } = weekBounds(cursor); let out = '<div class="week-grid">';['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].forEach((n, i) => { const d = days[i], iso = dateISO(d), p = calendarPercentForDay(d), sel = iso === calendarSelectedDate; out += `<button class="week-day ${sel ? 'selected' : ''} ${p >= 100 ? 'is-complete' : ''} ${p === 0 ? 'is-empty' : ''}" data-cal-date="${iso}"><strong>${n}</strong><span class="day-number">${d.getDate()}</span>${calendarRingMarkup(p, 'week-ring')}<span class="week-percent">${p ? p + '%' : ''}</span><div class="progress-track"><i style="width:${p}%"></i></div></button>` }); return out + '</div>'; }
 function dayView(cursor) { const iso = dateISO(cursor), p = pctForDate(cursor), items = state.events.filter(e => e.date === iso), habits = calendarHabitsForDay(cursor); return `<div class="day-view"><div class="day-focus"><div class="focus-date">Selected day</div><div class="focus-title-row"><h3>${cursor.toLocaleDateString('en-IN', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}</h3><strong>${p}%</strong></div><div class="progress-line"><i style="width:${p}%"></i></div><div class="day-habit-list">${habits.map(x => `<div class="detail-item"><span class="item-emoji">${esc(x.habit.emoji || '')}</span><span>${esc(x.habit.name)}</span><small>${x.percent}%</small></div>`).join('') || '<p class="muted-copy">No recorded habit activity for this date.</p>'}${items.map(e => `<div class="detail-item"><span class="item-emoji">${esc(e.emoji || '📅')}</span><span>${esc(e.title)}</span><small>${esc(formatTime(e.time))}</small><button class="icon-delete" data-edit-event="${e.id}" aria-label="Edit event">${icon('edit')}</button><button class="icon-delete" data-delete-event="${e.id}" aria-label="Delete event">${icon('trash')}</button></div>`).join('')}</div></div></div>`; }
 function initCalendar() { let cursor = new Date(calendarSelectedDate + 'T12:00:00'); if (Number.isNaN(cursor.getTime())) { cursor = new Date(); cursor.setHours(12, 0, 0, 0); } let mode = 'month'; const root = document.querySelector('.page-calendar'); if (!root) return; const body = root.querySelector('#calendarBody'), title = root.querySelector('#monthTitle'), picker = root.querySelector('#monthPicker'); function rebuildPicker() { picker.innerHTML = ''; picker.classList.remove('picker-months', 'picker-weeks', 'picker-days'); if (mode === 'month') { picker.classList.add('picker-months'); for (let i = -6; i <= 6; i++) { const d = new Date(cursor.getFullYear(), cursor.getMonth() + i, 1, 12), b = document.createElement('button'); b.type = 'button'; b.textContent = monthLabel(d); if (d.getMonth() === cursor.getMonth() && d.getFullYear() === cursor.getFullYear()) b.classList.add('active'); b.addEventListener('click', () => { cursor = d; calendarSelectedDate = dateISO(d); picker.classList.add('hidden'); renderCal(); }); picker.appendChild(b); } } else if (mode === 'week') { picker.classList.add('picker-weeks'); const y = cursor.getFullYear(), m = cursor.getMonth(), daysInMonth = new Date(y, m + 1, 0).getDate(), first = (new Date(y, m, 1, 12).getDay() - weekStartIndex() + 7) % 7, weekCount = Math.ceil((first + daysInMonth) / 7); for (let w = 1; w <= weekCount; w++) { const startDay = (w - 1) * 7 - first + 1, firstDay = Math.max(1, startDay), lastDay = Math.min(daysInMonth, startDay + 6), b = document.createElement('button'); b.type = 'button'; b.textContent = `Week ${w} · ${firstDay}–${lastDay}`; const currentWeek = Math.floor((first + cursor.getDate() - 1) / 7) + 1; if (w === currentWeek) b.classList.add('active'); b.addEventListener('click', () => { cursor = new Date(y, m, firstDay, 12); calendarSelectedDate = dateISO(cursor); picker.classList.add('hidden'); renderCal(); }); picker.appendChild(b); } } else { picker.classList.add('picker-days'); const y = cursor.getFullYear(), m = cursor.getMonth(), days = new Date(y, m + 1, 0).getDate(); for (let n = 1; n <= days; n++) { const b = document.createElement('button'); b.type = 'button'; b.textContent = `${n} · ${new Date(y, m, n, 12).toLocaleDateString('en-IN', { weekday: 'short' })}`; if (n === cursor.getDate()) b.classList.add('active'); b.addEventListener('click', () => { cursor = new Date(y, m, n, 12); calendarSelectedDate = dateISO(cursor); picker.classList.add('hidden'); renderCal(); }); picker.appendChild(b); } } } function renderCal() { title.innerHTML = `${monthLabel(cursor)} ${icon('chevron')}`; body.innerHTML = calendarGrid(cursor, mode); root.querySelectorAll('[data-cal-date]').forEach(b => b.addEventListener('click', () => { cursor = new Date(b.dataset.calDate + 'T12:00:00'); calendarSelectedDate = b.dataset.calDate; renderCal(); })); root.querySelectorAll('[data-edit-event]').forEach(b => b.addEventListener('click', () => eventForm(b.dataset.editEvent)));
-    root.querySelectorAll('[data-delete-event]').forEach(b => b.addEventListener('click', () => { const e = state.events.find(x => x.id === b.dataset.deleteEvent); if (!e) return; state.events = state.events.filter(x => x.id !== e.id); const linked = state.reminders.filter(r => r.eventId === e.id); state.reminders = state.reminders.filter(r => r.eventId !== e.id); state.syncMeta = state.syncMeta || clone(defaultState.syncMeta); state.syncMeta.deleted = state.syncMeta.deleted || clone(defaultState.syncMeta.deleted); state.syncMeta.deleted.events = state.syncMeta.deleted.events || {}; state.syncMeta.deleted.events[e.id] = new Date().toISOString(); state.syncMeta.deleted.reminders = state.syncMeta.deleted.reminders || {}; linked.forEach(r => state.syncMeta.deleted.reminders[r.id] = new Date().toISOString()); save(); renderCal(); })); renderDetail(); } function renderDetail() { const d = dateISO(cursor), dayHabits = calendarHabitsForDay(cursor), p = dailyProgress(d), items = state.events.filter(e => e.date === d); root.querySelector('#dayDetail').innerHTML = `<div class="detail-kicker">Selected day</div><div class="detail-title">${cursor.toLocaleDateString('en-IN', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}</div><div class="daily-progress"><span>Daily progress</span><strong>${p}%</strong></div><div class="progress-line"><i style="width:${p}%"></i></div><div class="detail-items">${dayHabits.map(x => `<div class="detail-item"><span class="item-emoji">${esc(x.habit.emoji || '')}</span><span>${esc(x.habit.name)}</span><small>${x.percent}%</small></div>`).join('') || '<p class="muted-copy">No recorded habit activity for this date.</p>'}${items.map(e => `<div class="detail-item"><span class="item-emoji">${esc(e.emoji || '📅')}</span><span>${esc(e.title)}</span><small>${esc(formatTime(e.time))}</small><button class="icon-delete" data-edit-event="${e.id}" aria-label="Edit event">${icon('edit')}</button><button class="icon-delete" data-delete-event="${e.id}" aria-label="Delete event">${icon('trash')}</button></div>`).join('')}</div>`; const reminderList = root.querySelector('#calendarReminderList'); if (reminderList) { reminderList.innerHTML = reminderOverviewMarkup(d); root.querySelectorAll('[data-add-reminder]').forEach(b => b.addEventListener('click', () => reminderForm())); } root.querySelectorAll('[data-edit-event]').forEach(b => b.addEventListener('click', () => eventForm(b.dataset.editEvent)));
+    root.querySelectorAll('[data-delete-event]').forEach(b => b.addEventListener('click', () => { const e = state.events.find(x => x.id === b.dataset.deleteEvent); if (!e) return; state.events = state.events.filter(x => x.id !== e.id); const linked = state.reminders.filter(r => r.eventId === e.id); state.reminders = state.reminders.filter(r => r.eventId !== e.id); state.syncMeta = state.syncMeta || clone(defaultState.syncMeta); state.syncMeta.deleted = state.syncMeta.deleted || clone(defaultState.syncMeta.deleted); state.syncMeta.deleted.events = state.syncMeta.deleted.events || {}; state.syncMeta.deleted.events[e.id] = new Date().toISOString(); state.syncMeta.deleted.reminders = state.syncMeta.deleted.reminders || {}; linked.forEach(r => state.syncMeta.deleted.reminders[r.id] = new Date().toISOString()); save(); renderCal(); })); renderDetail(); } function renderDetail() { const d = dateISO(cursor), dayHabits = calendarHabitsForDay(cursor), p = dailyProgress(d), items = state.events.filter(e => e.date === d); root.querySelector('#dayDetail').innerHTML = `<div class="detail-kicker">Selected day</div><div class="detail-title">${cursor.toLocaleDateString('en-IN', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}</div><div class="daily-progress"><span>Daily progress</span><strong>${p}%</strong></div><div class="calendar-day-meta"><span>${dayHabits.filter(x=>x.percent>=100).length} completed</span><span>${dayHabits.length} scheduled</span><span>${items.length} event${items.length===1?'':'s'}</span></div><div class="progress-line"><i style="width:${p}%"></i></div><div class="detail-items">${dayHabits.map(x => `<div class="detail-item"><span class="item-emoji">${esc(x.habit.emoji || '')}</span><span>${esc(x.habit.name)}</span><small>${x.percent}%</small></div>`).join('') || '<p class="muted-copy">No recorded habit activity for this date.</p>'}${items.map(e => `<div class="detail-item"><span class="item-emoji">${esc(e.emoji || '📅')}</span><span>${esc(e.title)}</span><small>${esc(formatTime(e.time))}</small><button class="icon-delete" data-edit-event="${e.id}" aria-label="Edit event">${icon('edit')}</button><button class="icon-delete" data-delete-event="${e.id}" aria-label="Delete event">${icon('trash')}</button></div>`).join('')}</div>`; const reminderList = root.querySelector('#calendarReminderList'); if (reminderList) { reminderList.innerHTML = reminderOverviewMarkup(d); root.querySelectorAll('[data-add-reminder]').forEach(b => b.addEventListener('click', () => reminderForm())); } root.querySelectorAll('[data-edit-event]').forEach(b => b.addEventListener('click', () => eventForm(b.dataset.editEvent)));
     root.querySelectorAll('[data-delete-event]').forEach(b => b.addEventListener('click', () => { const e = state.events.find(x => x.id === b.dataset.deleteEvent); if (!e) return; state.events = state.events.filter(x => x.id !== e.id); const linked = state.reminders.filter(r => r.eventId === e.id); state.reminders = state.reminders.filter(r => r.eventId !== e.id); state.syncMeta = state.syncMeta || clone(defaultState.syncMeta); state.syncMeta.deleted = state.syncMeta.deleted || clone(defaultState.syncMeta.deleted); state.syncMeta.deleted.events = state.syncMeta.deleted.events || {}; state.syncMeta.deleted.events[e.id] = new Date().toISOString(); state.syncMeta.deleted.reminders = state.syncMeta.deleted.reminders || {}; linked.forEach(r => state.syncMeta.deleted.reminders[r.id] = new Date().toISOString()); save(); renderCal(); })); root.querySelectorAll('[data-edit-reminder]').forEach(b => b.addEventListener('click', () => reminderForm(b.dataset.editReminder))); root.querySelectorAll('[data-toggle-reminder]').forEach(b => b.addEventListener('change', () => { const r = state.reminders.find(x => x.id === b.dataset.toggleReminder); if (!r) return; r.enabled = b.checked; save(); renderCal(); toast(r.enabled ? 'Reminder enabled' : 'Reminder turned off'); })); } root.querySelectorAll('#calModes button').forEach(b => b.addEventListener('click', () => { mode = b.dataset.mode; root.querySelectorAll('#calModes button').forEach(x => x.classList.toggle('active', x === b)); picker.classList.add('hidden'); rebuildPicker(); renderCal(); })); root.querySelector('#calPrev').addEventListener('click', () => { if (mode === 'month') cursor = new Date(cursor.getFullYear(), cursor.getMonth() - 1, Math.min(cursor.getDate(), 28), 12); else if (mode === 'week') { cursor = new Date(cursor); cursor.setDate(cursor.getDate() - 7); } else { cursor = new Date(cursor); cursor.setDate(cursor.getDate() - 1); } calendarSelectedDate = dateISO(cursor); picker.classList.add('hidden'); rebuildPicker(); renderCal(); }); root.querySelector('#calNext').addEventListener('click', () => { if (mode === 'month') cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, Math.min(cursor.getDate(), 28), 12); else if (mode === 'week') { cursor = new Date(cursor); cursor.setDate(cursor.getDate() + 7); } else { cursor = new Date(cursor); cursor.setDate(cursor.getDate() + 1); } calendarSelectedDate = dateISO(cursor); picker.classList.add('hidden'); rebuildPicker(); renderCal(); }); root.querySelector('#calToday').addEventListener('click', () => { cursor = new Date(); cursor.setHours(12, 0, 0, 0); calendarSelectedDate = dateISO(cursor); picker.classList.add('hidden'); rebuildPicker(); renderCal(); }); title.addEventListener('click', () => { rebuildPicker(); picker.classList.toggle('hidden'); }); calendarSelectedDate = dateISO(cursor); rebuildPicker(); renderCal(); }
 
-function statisticsPage() { return shell('statistics', `<div class="page-title statistics-title"><h1>Statistics</h1><p>Track your progress and build better habits.</p></div><div class="statistics-controls"><div class="period-switch" id="statPeriods"><button class="active" data-period="day">Day</button><button data-period="week">Week</button><button data-period="month">Month</button><button data-period="custom">Custom Range</button></div><div class="stat-date">${icon('calendar')}<span id="statDate"></span></div><button class="export-btn" id="exportStats">${icon('download')} Export</button></div><section class="kpi-grid" id="statKpis"></section><section class="statistics-grid"><article class="panel trend-panel"><div class="panel-title-row"><h2>Completion Trend</h2><select id="chartMode"><option value="day">Daily</option><option value="week">Weekly</option><option value="month">Monthly</option><option value="custom">Custom</option></select></div><div id="trendChart" class="trend-chart"></div><div class="trend-legend"><span><i></i> Completion</span><span id="trendCaption">Recorded activity</span></div></article><article class="panel performers"><h2>Top Performers</h2><div id="topPerformers"></div></article></section><section class="panel categories-panel"><h2>Habit Categories</h2><div id="categories" class="categories-grid"></div></section>`); }
+function statisticsHeatmapMarkup() { const end=new Date(todayISO()+'T12:00:00'); const start=new Date(end); start.setDate(end.getDate()-83); const cells=[]; for(let i=0;i<84;i++){const d=new Date(start); d.setDate(start.getDate()+i); const iso=dateISO(d), p=state.activityHistory?.[iso]?dailyProgress(iso):0; cells.push(`<span class="heat-cell level-${p>=80?4:p>=60?3:p>=30?2:p>0?1:0}" title="${iso}: ${p}%"></span>`);} return `<section class="panel heatmap-panel"><div class="panel-title-row"><div><h2>Consistency Heatmap</h2><p class="panel-subtitle">Last 12 weeks of recorded activity</p></div><span class="heat-legend">Less · More</span></div><div class="heatmap">${cells.join('')}</div></section>`; }
+function statisticsPage() { return shell('statistics', `<div class="page-title statistics-title"><h1>Statistics</h1><p>Track your progress and build better habits.</p></div><div class="statistics-controls"><div class="period-switch" id="statPeriods"><button class="active" data-period="day">Day</button><button data-period="week">Week</button><button data-period="month">Month</button><button data-period="custom">Custom Range</button></div><div class="stat-date">${icon('calendar')}<span id="statDate"></span></div><button class="export-btn" id="exportStats">${icon('download')} Export</button></div><section class="kpi-grid" id="statKpis"></section><section class="statistics-grid"><article class="panel trend-panel"><div class="panel-title-row"><h2>Completion Trend</h2><select id="chartMode"><option value="day">Daily</option><option value="week">Weekly</option><option value="month">Monthly</option><option value="custom">Custom</option></select></div><div id="trendChart" class="trend-chart"></div><div class="trend-legend"><span><i></i> Completion</span><span id="trendCaption">Recorded activity</span></div></article><article class="panel performers"><h2>Top Performers</h2><div id="topPerformers"></div></article></section>${statisticsHeatmapMarkup()}<section class="panel categories-panel"><h2>Habit Categories</h2><div id="categories" class="categories-grid"></div></section>`); }
 function customRangeForm(apply) { modal('Custom range', 'Choose the period used by Statistics.', `<form class="form" id="rangeForm"><div class="form-grid"><div class="field"><label>Start date</label><input type="date" name="start" value="${todayISO()}" required></div><div class="field"><label>End date</label><input type="date" name="end" value="${todayISO()}" required></div></div><div class="form-actions"><button type="button" class="secondary-btn" data-modal-close>Cancel</button><button class="primary-btn">Apply range →</button></div></form>`); document.getElementById('rangeForm').addEventListener('submit', e => { e.preventDefault(); const fd = new FormData(e.target), s = fd.get('start'), en = fd.get('end'); if (s > en) { toast('End date must be after the start date'); return; } apply(s, en); closeModal(); }); }
 function dateRange(start, end) { const out = []; let d = new Date(start + 'T12:00:00'), last = new Date(end + 'T12:00:00'); while (d <= last) { out.push(new Date(d)); d.setDate(d.getDate() + 1); } return out; }
 function weeklyActivityData(anchor) { const b = weekBounds(anchor); return b.days.map(d => { const iso = dateISO(d), future = iso > todayISO(), has = !!state.activityHistory?.[iso]; return { date: iso, label: d.toLocaleDateString('en-IN', { weekday: 'short' }), value: (!future && has) ? dailyProgress(iso) : null }; }); }
@@ -2086,6 +2120,7 @@ function bindHabitInteractions(root) {
       const row = b.closest('.habit-row');
       const h = state.habits.find(x => x.id === row?.dataset.id);
       if (!h || h.paused) return;
+      const beforeCurrent = Math.max(0, Number(h.current) || 0);
       if (action === 'plus') h.current = Math.min(Math.max(1, Number(h.target) || 1), (Number(h.current) || 0) + amount);
       if (action === 'minus') h.current = Math.max(0, (Number(h.current) || 0) - amount);
       if (action === 'complete' && pct(h) >= 100) h.current = Math.max(1, Number(h.target) || 1);
@@ -2095,9 +2130,12 @@ function bindHabitInteractions(root) {
       h.daily[todayISO()] = h.current;
       h.dailyUpdatedAt = h.dailyUpdatedAt || {};
       h.dailyUpdatedAt[todayISO()] = new Date().toISOString();
+      const undoCurrent = beforeCurrent;
       save();
-      if (shouldRender) render();
-      else updateRowVisual(h, row);
+      if (shouldRender) {
+        render();
+        showUndoToast(action === 'yes' || action === 'complete' ? 'Habit completed' : 'Habit updated', () => { const live=state.habits.find(x=>x.id===h.id); if(!live) return; live.current=Math.max(0,Math.min(Number(live.target)||1,undoCurrent)); live.daily=live.daily||{}; live.daily[todayISO()]=live.current; live.dailyUpdatedAt=live.dailyUpdatedAt||{}; live.dailyUpdatedAt[todayISO()]=new Date().toISOString(); save(); render(); toast('Change undone'); });
+      } else updateRowVisual(h, row);
     };
     const action = b.dataset.habitAction;
     const startHold = e => {
@@ -2166,7 +2204,7 @@ function calendarHabitsForDay(d) {
   const iso = dateISO(d);
   const snap = snapshotForDate(iso);
   if (!snap) return [];
-  return snap.habits.map(h => ({ habit: state.habits.find(x => x.id === h.id) || h, percent: Math.max(0, Math.min(100, Number(h.percent) || 0)), current: h.current, target: h.target, unit: h.unit }));
+  return snap.habits.filter(h => habitScheduledOnDate(h, iso)).map(h => ({ habit: state.habits.find(x => x.id === h.id) || h, percent: Math.max(0, Math.min(100, Number(h.percent) || 0)), current: h.current, target: h.target, unit: h.unit }));
 }
 function calendarDailyProgress(d) { return dailyProgress(dateISO(d)); }
 function calendarPercentForDay(d) { return calendarDailyProgress(d); }
@@ -2297,7 +2335,7 @@ function settingsSection(key) {
   if (key === 'notifications') return `<article class="settings-card"><div class="settings-card-head"><div class="settings-heading-icon purple">${icon('bell')}</div><div><h2>Notifications</h2><p>Control habit and event reminders independently. Events always notify at their scheduled time.</p></div></div><div class="settings-options">${[['habitReminders', 'Habit reminders', 'Allow scheduled reminders for your habits.', 'bell'], ['eventReminders', 'Event reminders', 'Allow scheduled reminders for calendar events.', 'calendar'], ['motivational', 'Motivational messages', 'Receive helpful daily motivation.', 'star'], ['weekly', 'Weekly summary', 'Get a weekly progress summary.', 'chart'], ['goal', 'Goal reminders', 'Stay on track with important goals.', 'trophy']].map(([k, t, d, i]) => `<label class="settings-option"><span class="option-icon">${icon(i === 'star' ? 'plusCircle' : i)}</span><span><b>${t}</b><small>${d}</small></span><input type="checkbox" data-notify="${k}" ${s.notifications[k] !== false ? 'checked' : ''}><i class="toggle"></i></label>`).join('')}</div><div class="settings-subsection"><div class="settings-subhead"><b>Habit reminder defaults</b><small>These defaults apply when you create a new habit reminder.</small></div><div class="settings-preference-grid"><div class="field"><label>Default habit reminder time</label><input id="prefDefaultHabitTime" class="time-text-input" type="text" value="${esc(formatTimeShort(s.notifications.defaultHabitTime || '20:00:00'))}" placeholder="${userTimeFormat()==='12h'?'8:00 PM':'20:00'}" autocomplete="off"></div></div><div class="field"><label>Default habit reminder days</label><div class="reminder-day-picker settings-day-picker">${[[1,'Mon'],[2,'Tue'],[3,'Wed'],[4,'Thu'],[5,'Fri'],[6,'Sat'],[0,'Sun']].map(([v,label]) => `<label class="reminder-day"><input type="checkbox" name="defaultHabitDays" value="${v}" ${normalizeReminderDays(s.notifications.defaultHabitDays).includes(v)?'checked':''}><span>${label}</span></label>`).join('')}</div></div></div><div class="notification-permission-card"><div><b>Browser notification permission</b><small>${typeof Notification === 'undefined' ? 'Not supported by this browser.' : Notification.permission === 'granted' ? 'Allowed — Habitly can show browser notifications.' : Notification.permission === 'denied' ? 'Blocked — enable notifications in browser settings.' : 'Not enabled yet.'}</small></div><button type="button" class="secondary-btn" id="enableBrowserNotifications">${typeof Notification !== 'undefined' && Notification.permission === 'granted' ? 'Notifications enabled' : 'Enable notifications'}</button></div><div class="settings-note">Habitly uses browser notifications and the reminder service for scheduled alerts. Keep browser notifications allowed if you want reminder alerts while Habitly is open or running in the background. Event reminders default to the event time for new events, and habit reminders default to 8:00 PM every day.</div></article>`;
   if (key === 'habits') return `<article class="settings-card"><div class="settings-card-head"><div class="settings-heading-icon purple">${icon('target')}</div><div><h2>Habit Preferences</h2><p>Customize how your habits are displayed and tracked.</p></div></div><div class="settings-preference-grid"><div class="field"><label>Time format</label><select id="prefTimeFormat"><option value="12h" ${s.timeFormat !== '24h' ? 'selected' : ''}>12-hour (AM/PM)</option><option value="24h" ${s.timeFormat === '24h' ? 'selected' : ''}>24-hour</option></select></div><div class="field"><label>Default habit view</label><select id="prefDefaultView"><option>All Habits</option><option>Active</option><option>Completed</option><option>Paused</option></select></div><div class="field"><label>Week starts on</label><select id="prefWeekStart"><option>Monday</option><option>Sunday</option></select></div></div><div class="settings-options compact-options"><label class="settings-option"><span class="option-icon">${icon('check')}</span><span><b>Auto-complete at target</b><small>Mark quantity habits complete when they reach their target.</small></span><input type="checkbox" id="prefAuto" ${s.habits.autoComplete ? 'checked' : ''}><i class="toggle"></i></label><label class="settings-option"><span class="option-icon">${icon('pause')}</span><span><b>Keep streaks during pauses</b><small>Paused habits do not break an existing streak.</small></span><input type="checkbox" id="prefStreak" ${s.habits.keepStreak ? 'checked' : ''}><i class="toggle"></i></label><label class="settings-option"><span class="option-icon">${icon('plus')}</span><span><b>Show quick quantity controls</b><small>Keep plus and minus controls visible on habit cards.</small></span><input type="checkbox" id="prefQuick" ${s.habits.quickQuantity ? 'checked' : ''}><i class="toggle"></i></label></div></article>`;
   if (key === 'fitness') { const f=s.fitness||defaultState.settings.fitness; return `<article class="settings-card fitness-settings-card"><div class="settings-card-head"><div class="settings-heading-icon purple">🏋️</div><div><h2>Fitness Tracking</h2><p>Choose which optional fitness sections appear inside Fitness Goals.</p></div></div><div class="fitness-settings-list"><label class="fitness-setting-row"><span class="fitness-setting-icon">🏋️</span><span class="fitness-setting-copy"><b>Workout & strength logging</b><small>Track exercises, weight, sets, reps and personal records.</small></span><input type="checkbox" id="prefWorkoutLogging" ${f.workoutLogging?'checked':''}><span class="fitness-setting-toggle" aria-hidden="true"></span></label><label class="fitness-setting-row"><span class="fitness-setting-icon">📏</span><span class="fitness-setting-copy"><b>Body measurements</b><small>Track optional chest, waist, arms, thighs and shoulder measurements.</small></span><input type="checkbox" id="prefBodyMeasurements" ${f.bodyMeasurements?'checked':''}><span class="fitness-setting-toggle" aria-hidden="true"></span></label></div><div class="settings-note">Weight tracking, averages, progress and the main Fitness Dashboard are always available. These advanced sections are off by default.</div></article>`; }
-  if (key === 'security') return `<article class="settings-card"><div class="settings-card-head"><div class="settings-heading-icon blue">${icon('shield')}</div><div><h2>Privacy & Security</h2><p>Protect your account and control access to your local Habitly data.</p></div></div><div class="security-status"><span class="security-icon">${icon('shield')}</span><div><b>Local data protection</b><small>Habitly keeps a local working copy in this browser and, for cloud-enabled accounts, synchronizes through the authenticated Supabase data layer.</small></div><span class="status-pill">Active</span></div><div class="security-grid"><button class="security-action" data-security="sessions"><span>${icon('desktop')}</span><b>Active session</b><small>This browser</small></button><button class="security-action" data-security="clear"><span>${icon('trash')}</span><b>Clear local data</b><small>Requires confirmation</small></button></div><div class="settings-note">There is no server-side login or password system in this frontend, so password/2FA controls are intentionally not presented as fake functionality.</div></article>`;
+  if (key === 'security') return `<article class="settings-card"><div class="settings-card-head"><div class="settings-heading-icon blue">${icon('shield')}</div><div><h2>Privacy & Security</h2><p>Review your authenticated account, cloud connection and local-device protection.</p></div></div><div class="security-status"><span class="security-icon">${icon('shield')}</span><div><b>Account security</b><small>${currentAuthUser?.email_verified_at || currentAuthUser?.confirmed_at ? 'Email verified' : 'Email verification status is managed by Supabase'}</small></div><span class="status-pill">${currentAuthUser?'Authenticated':'Offline'}</span></div><div class="security-grid"><button class="security-action" data-security="sessions"><span>${icon('desktop')}</span><b>Saved sessions</b><small>${savedAccounts().length} account${savedAccounts().length===1?'':'s'} on this device</small></button><button class="security-action" data-account-switch><span>${icon('user')}</span><b>Switch account</b><small>Manage saved accounts</small></button><button class="security-action" data-security="clear"><span>${icon('trash')}</span><b>Clear local data</b><small>Requires confirmation</small></button></div><div class="security-checklist"><div>✓ Supabase authentication</div><div>✓ Per-account local storage isolation</div><div>✓ Cloud data protected by authenticated access policies</div><div>✓ Passwords are never stored by the account switcher</div></div></article>`;
   if (key === 'data') {
     const d = (state.settings?.drive) || {};
     const storage = state.settings?.storage || { mode: 'local', setupCompleted: true };
@@ -2987,7 +3025,7 @@ function initSettings() {
       [['#prefAuto', 'autoComplete'], ['#prefStreak', 'keepStreak'], ['#prefQuick', 'quickQuantity']].forEach(([sel, k]) => root.querySelector(sel).addEventListener('change', e => { v[k] = e.target.checked; save(); }));
     }
     if (key === 'fitness') { const f=safesettings().fitness; root.querySelector('#prefWorkoutLogging')?.addEventListener('change',e=>{f.workoutLogging=e.target.checked;save();show('fitness');toast(e.target.checked?'Workout logging enabled':'Workout logging disabled');}); root.querySelector('#prefBodyMeasurements')?.addEventListener('change',e=>{f.bodyMeasurements=e.target.checked;save();show('fitness');toast(e.target.checked?'Body measurements enabled':'Body measurements disabled');}); }
-    if (key === 'security') { root.querySelector('[data-security="sessions"]')?.addEventListener('click', () => toast('This browser is the only active local session.')); root.querySelector('[data-security="clear"]')?.addEventListener('click', () => confirmClearData()); }
+    if (key === 'security') { root.querySelector('[data-security="sessions"]')?.addEventListener('click', () => accountSwitchModal()); root.querySelector('[data-security="clear"]')?.addEventListener('click', () => confirmClearData()); }
     if (key === 'data') { root.querySelector('#exportBackup')?.addEventListener('click', exportBackup); root.querySelector('#importBackup')?.addEventListener('change', importBackup); if (state.settings?.storage?.mode === 'cloud' || state.settings?.storage?.mode === 'drive' || state.settings?.storage?.mode === 'both') bindDriveSettings(root); }
   }
   function safesettings() { if (!state.settings) state.settings = clone(defaultState.settings); return state.settings; }
@@ -3016,7 +3054,7 @@ function habitForm(id) {
       <div class="field"><label>Unit</label><input name="unit" value="${esc(h?.unit || '')}" placeholder="glasses, pages, min"></div>
     </div>
     <div class="form-section"><span class="form-step">03</span><div><strong>Schedule</strong><small>Keep the routine predictable</small></div></div>
-    <div class="field"><label>Frequency</label><select name="frequency"><option ${h?.frequency === 'Daily' || !h ? 'selected' : ''}>Daily</option><option ${h?.frequency === 'Selected Days' ? 'selected' : ''}>Selected Days</option></select></div>
+    <div class="field"><label>Frequency</label><select name="frequency"><option ${h?.frequency === 'Daily' || !h ? 'selected' : ''}>Daily</option><option ${h?.frequency === 'Selected Days' ? 'selected' : ''}>Selected Days</option></select></div><div class="field selected-days-field ${h?.frequency==='Selected Days'?'':'hidden'}"><label>Selected days *</label><div class="habit-day-picker">${[[1,'Mon'],[2,'Tue'],[3,'Wed'],[4,'Thu'],[5,'Fri'],[6,'Sat'],[0,'Sun']].map(([v,l])=>`<label><input type="checkbox" name="selectedDay" value="${v}" ${(h?.selectedDays||[0,1,2,3,4,5,6]).includes(v)?'checked':''}><span>${l}</span></label>`).join('')}</div><small>Choose at least one day.</small></div>
     ${id ? `<label class="switch-row"><span><b>Pause habit</b><small>Pause without losing progress.</small></span><input type="checkbox" name="paused" ${h?.paused ? 'checked' : ''}><i></i></label>` : ''}
     <div class="form-actions"><button type="button" class="secondary-btn" data-modal-close>Cancel</button><button class="primary-btn">${id ? 'Save Changes' : 'Add Habit'} →</button></div>
   </form>`);
@@ -3025,6 +3063,10 @@ function habitForm(id) {
   const measureFields = form.querySelector('#habitMeasureFields');
   const targetInput = form.querySelector('[name="target"]');
   const unitInput = form.querySelector('[name="unit"]');
+  const frequencyInput = form.querySelector('[name="frequency"]');
+  const selectedDaysField = form.querySelector('.selected-days-field');
+  const syncScheduleUI = () => selectedDaysField?.classList.toggle('hidden', frequencyInput?.value !== 'Selected Days');
+  frequencyInput?.addEventListener('change', syncScheduleUI); syncScheduleUI();
   const requiredMark = form.querySelector('.target-required');
   const help = form.querySelector('.yesno-help');
   let lastQuantityTarget = selectedType === 'yesno' ? '1' : String(h?.target ?? '');
@@ -3087,10 +3129,13 @@ function habitForm(id) {
     if (type !== 'yesno' && !/^\d+$/.test(rawTarget)) { toast('Enter a valid whole-number target'); targetInput.focus(); return; }
     const target = type === 'yesno' ? 1 : Math.max(1, Number(rawTarget));
     const unit = type === 'yesno' ? 'completion' : (String(fd.get('unit') || '').trim() || 'times');
+    const frequency = String(fd.get('frequency') || 'Daily');
+    const selectedDays = [...form.querySelectorAll('[name="selectedDay"]:checked')].map(x=>Number(x.value));
+    if (frequency === 'Selected Days' && !selectedDays.length) { toast('Select at least one day'); return; }
     if (id) {
       const today = todayISO();
       const hasTodayRecord = Object.prototype.hasOwnProperty.call(h.daily || {}, today);
-      Object.assign(h, { name: String(fd.get('name')).trim(), category: fd.get('category'), emoji: String(fd.get('emoji') || '').trim(), type, target, unit, frequency: fd.get('frequency'), paused: fd.get('paused') === 'on', updatedAt: new Date().toISOString() });
+      Object.assign(h, { name: String(fd.get('name')).trim(), category: fd.get('category'), emoji: String(fd.get('emoji') || '').trim(), type, target, unit, frequency, selectedDays: frequency==='Selected Days'?selectedDays:[0,1,2,3,4,5,6], paused: fd.get('paused') === 'on', updatedAt: new Date().toISOString() });
       h.current = Math.min(Number(h.current) || 0, target);
       // If today's progress actually exists, keep the authoritative daily
       // record in sync with a reduced target. Otherwise do not create one.
@@ -3101,7 +3146,7 @@ function habitForm(id) {
         h.dailyUpdatedAt[today] = new Date().toISOString();
       }
     } else {
-      state.habits.push({ id: uid('h'), name: String(fd.get('name')).trim(), emoji: String(fd.get('emoji') || '').trim(), category: fd.get('category'), type, target, current: 0, unit, paused: false, created: Date.now(), frequency: fd.get('frequency'), updatedAt: new Date().toISOString() });
+      state.habits.push({ id: uid('h'), name: String(fd.get('name')).trim(), emoji: String(fd.get('emoji') || '').trim(), category: fd.get('category'), type, target, current: 0, unit, paused: false, created: Date.now(), frequency, selectedDays: frequency==='Selected Days'?selectedDays:[0,1,2,3,4,5,6], updatedAt: new Date().toISOString() });
     }
     save(); closeModal(); render(); toast(id ? 'Habit updated' : 'Habit added');
   });
@@ -3437,9 +3482,10 @@ function bindCommon() {
   document.querySelectorAll('[data-open-habit]').forEach(b => b.addEventListener('click', () => habitForm()));
   if (currentRoute() === 'dashboard') {
     const root = document.getElementById('dashboardHabits'); if (root) bindHabitInteractions(root);
-    document.querySelectorAll('[data-filter-group="dashboard"] .filter').forEach(b => b.addEventListener('click', () => { document.querySelectorAll('[data-filter-group="dashboard"] .filter').forEach(x => x.classList.toggle('active', x === b)); const filter = b.dataset.filter; const habits = state.habits.filter(h => !h.paused && (filter === 'All' || h.category === filter)); if (root) root.innerHTML = habits.map(h => habitRow(h)).join('') || '<div class="empty-state"><strong>No habits in this category.</strong></div>'; if (root) bindHabitInteractions(root); }));
+    document.querySelectorAll('[data-filter-group="dashboard"] .filter').forEach(b => b.addEventListener('click', () => { document.querySelectorAll('[data-filter-group="dashboard"] .filter').forEach(x => x.classList.toggle('active', x === b)); const filter = b.dataset.filter; const habits = state.habits.filter(h => !h.paused && habitScheduledOnDate(h,todayISO()) && (filter === 'All' || h.category === filter)); if (root) root.innerHTML = habits.map(h => habitRow(h)).join('') || '<div class="empty-state"><strong>No habits in this category.</strong></div>'; if (root) bindHabitInteractions(root); }));
   }
-}
+
+  document.querySelectorAll('[data-account-switch]').forEach(b => b.addEventListener('click', e => { e.preventDefault(); accountSwitchModal(); }));}
 function keyHandler(e) { if (e.key === 'Escape') { closeDrawer(); closeModal(); document.querySelectorAll('.menu-popover').forEach(x => x.remove()); } }
 function openDrawer() { const d = document.getElementById('drawer'); if (d) { d.classList.add('open'); d.setAttribute('aria-hidden', 'false'); document.body.classList.add('drawer-open'); } }
 function closeDrawer() { const d = document.getElementById('drawer'); if (d) { d.classList.remove('open'); d.setAttribute('aria-hidden', 'true'); document.body.classList.remove('drawer-open'); } }
@@ -3647,6 +3693,7 @@ async function bootstrapApp() {
     window.addEventListener('habitly-auth-state', event => {
       const { event: authEvent, session } = event.detail || {};
       const nextUser = session?.user || null;
+      if (session?.user) saveAccountSession(session);
       const nextId = nextUser?.id || '';
       const currentId = currentAuthUser?.id || '';
 
@@ -3655,7 +3702,7 @@ async function bootstrapApp() {
         return;
       }
       if (!nextUser || nextId === currentId) return;
-      if (authEvent === 'TOKEN_REFRESHED') return;
+      if (authEvent === 'TOKEN_REFRESHED') { if (session?.user) saveAccountSession(session); return; }
       if (authEvent === 'PASSWORD_RECOVERY') return;
       if (authEvent === 'INITIAL_SESSION' || authEvent === 'SIGNED_IN' || authEvent === 'USER_UPDATED') {
         handleAuthenticatedUser(nextUser).catch(error => {
@@ -3669,7 +3716,7 @@ async function bootstrapApp() {
     try {
       const { data, error } = await sb.auth.getSession();
       if (error) throw error;
-      if (data?.session?.user) await handleAuthenticatedUser(data.session.user);
+      if (data?.session?.user) { saveAccountSession(data.session); await handleAuthenticatedUser(data.session.user); }
       else clearAuthenticatedState();
     } catch (e) {
       console.error('Habitly session bootstrap failed:', e);

@@ -1,4 +1,4 @@
-const CACHE_NAME = 'habitly-v15';
+const CACHE_NAME = 'habitly-v17';
 const STATIC_CACHE = `${CACHE_NAME}-static`;
 
 const APP_SHELL = [
