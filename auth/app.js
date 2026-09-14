@@ -321,6 +321,15 @@ function renderLogin() {
           </button>
         </p>
 
+        <div class="auth-feedback">
+          <span class="auth-feedback-label">Need help or want to share feedback?</span>
+          <div class="auth-feedback-links">
+            <a href="https://premkumar-portfolio-kohl.vercel.app/#contact" target="_blank" rel="noopener noreferrer">Contact</a>
+            <a href="https://premkumar-portfolio-kohl.vercel.app/#contact" target="_blank" rel="noopener noreferrer">Report an issue</a>
+            <a href="https://premkumar-portfolio-kohl.vercel.app/#contact" target="_blank" rel="noopener noreferrer">Share opinion</a>
+          </div>
+        </div>
+
       </form>
     `
     });

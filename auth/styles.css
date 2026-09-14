@@ -561,3 +561,12 @@ h1 .accent { color: var(--purple); }
   .auth-toast-action { grid-column: 2; justify-self: start; padding-left: 0; }
   .auth-toast-close { grid-column: 3; grid-row: 1 / span 2; }
 }
+
+
+/* Login help / feedback */
+.auth-feedback{margin-top:4px;padding-top:15px;border-top:1px solid var(--line);text-align:center}
+.auth-feedback-label{display:block;color:var(--muted);font-size:11px;line-height:1.4}
+.auth-feedback-links{display:flex;justify-content:center;align-items:center;gap:14px;flex-wrap:wrap;margin-top:7px}
+.auth-feedback-links a{color:var(--purple);font-size:11px;font-weight:750;text-decoration:none}
+.auth-feedback-links a:hover{text-decoration:underline}
+@media(max-width:560px){.auth-feedback-links{gap:10px 14px}}
