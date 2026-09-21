@@ -768,3 +768,14 @@
 @media(max-width:1000px){.insights-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:620px){.preview-habit-row{grid-template-columns:38px minmax(0,1fr)}.preview-emoji{width:38px;height:38px}.preview-target{grid-column:2;justify-self:start}.insights-grid{grid-template-columns:1fr}.insight-card{padding:12px}}
 @media(prefers-reduced-motion:reduce){.insight-card{transition:none}}
+
+/* ===== Streak Restore / Thunder ===== */
+.thunder-balance{display:inline-flex;align-items:center;gap:4px;margin-right:8px;padding:7px 10px;border:1px solid rgba(154,93,224,.18);border-radius:999px;background:#faf7ff;color:#7d43bd;font-size:12px;font-weight:800;white-space:nowrap}
+.thunder-restore-btn{display:flex;width:100%;align-items:center;justify-content:center;gap:8px;margin:12px 0;padding:11px 14px;border:1px solid rgba(154,93,224,.22);border-radius:12px;background:#faf7ff;color:#7139ad;font-weight:800;cursor:pointer;transition:transform .18s ease,box-shadow .18s ease,background .18s ease}
+.thunder-restore-btn:hover{transform:translateY(-1px);background:#f5edff;box-shadow:0 8px 22px rgba(113,57,173,.10)}
+.thunder-restored-note{margin:12px 0;padding:10px 12px;border-radius:12px;background:#faf7ff;color:#7139ad;font-size:13px;font-weight:700}
+.thunder-restore-banner{display:flex;gap:12px;align-items:center;padding:14px;border:1px solid rgba(154,93,224,.18);background:#faf7ff;border-radius:14px;margin-bottom:16px}
+.thunder-restore-banner>span{font-size:28px;line-height:1}
+.thunder-restore-banner div{display:grid;gap:3px}.thunder-restore-banner small{color:#756d7c;line-height:1.45}
+.thunder-habit-editor{display:grid;gap:10px;max-height:48vh;overflow:auto;padding-right:2px}.thunder-habit-editor .field{padding:11px 12px;border:1px solid #ebe7ef;border-radius:12px;background:#fff}.thunder-habit-editor .field>span{display:flex;justify-content:space-between;gap:10px;align-items:center;font-weight:700}.thunder-habit-editor .field>span small{font-weight:600;color:#8a8390}.thunder-habit-editor input{margin-top:8px}
+@media(max-width:700px){.thunder-balance{font-size:11px;padding:6px 8px}.thunder-habit-editor{max-height:52vh}}
