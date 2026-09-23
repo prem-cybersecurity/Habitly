@@ -2,7 +2,7 @@
    Dashboard / Habits / Goals / Calendar / Statistics
 */
 const AS = 'assets/';
-const APP_VERSION = '5.0.3';
+const APP_VERSION = '5.0.9';
 const ROUTES = ['dashboard', 'habits', 'goals', 'calendar', 'statistics', 'settings'];
 const STORAGE = 'habitly.final.v2';
 const USER_STORAGE_PREFIX = 'habitly.final.v3.user.';
@@ -725,6 +725,13 @@ function mergeForDriveUpload(remoteState, localState, dirtyOverride = syncDirty,
   if (dirty.profile) merged.profile = recordTime(local.profile?.updatedAt) >= recordTime(remote.profile?.updatedAt) ? clone(local.profile) : clone(remote.profile);
   if (dirty.settings) merged.settings = recordTime(local.settings?.updatedAt) >= recordTime(remote.settings?.updatedAt) ? clone(local.settings) : clone(remote.settings);
   if (dirty.activityHistory) merged.activityHistory = { ...(remote.activityHistory || {}), ...(local.activityHistory || {}) };
+  if (dirty.streakRecovery) {
+    const localRecovery = local.streakRecovery || null;
+    const remoteRecovery = remote.streakRecovery || null;
+    const localTime = recordTime(localRecovery?.updatedAt);
+    const remoteTime = recordTime(remoteRecovery?.updatedAt);
+    merged.streakRecovery = localTime >= remoteTime ? clone(localRecovery || remoteRecovery) : clone(remoteRecovery || localRecovery);
+  }
   return normalizeState(merged);
 }
 
@@ -894,6 +901,13 @@ function mergeCloudHydration(remoteState, localState) {
   // Activity history is date-scoped, so missing local dates can be safely retained.
   merged.activityHistory = { ...(local.activityHistory || {}), ...(remote.activityHistory || {}) };
   if (local.profile?.avatar && !merged.profile?.avatar) merged.profile.avatar = local.profile.avatar;
+  const localRecovery = local.streakRecovery || null;
+  const remoteRecovery = remote.streakRecovery || null;
+  if (localRecovery || remoteRecovery) {
+    const localTime = recordTime(localRecovery?.updatedAt);
+    const remoteTime = recordTime(remoteRecovery?.updatedAt);
+    merged.streakRecovery = localTime > remoteTime ? clone(localRecovery || remoteRecovery) : clone(remoteRecovery || localRecovery);
+  }
   return normalizeState(merged);
 }
 
@@ -2035,14 +2049,31 @@ const habitStreakCache = new Map();
 function habitStreak(h) {
   const cacheKey = `${h?.id || ''}|${todayISO()}|${syncGeneration}`;
   if (habitStreakCache.has(cacheKey)) return habitStreakCache.get(cacheKey);
-  let run=0, d=new Date(todayISO()+'T12:00:00');
-  for(let i=0;i<366;i++){
-    const iso=dateISO(d);
-    if(!habitScheduledOnDate(h,iso)) { d.setDate(d.getDate()-1); continue; }
-    const snap=state.activityHistory?.[iso];
-    const rec=snap?.habits?.find(x=>x.id===h.id);
-    if(!rec || Number(rec.percent)<100) break;
-    run++; d.setDate(d.getDate()-1);
+  let run = 0;
+  let d = new Date(todayISO() + 'T12:00:00');
+  let firstScheduledDay = true;
+  for (let i = 0; i < 366; i++) {
+    const iso = dateISO(d);
+    if (!habitScheduledOnDate(h, iso)) {
+      d.setDate(d.getDate() - 1);
+      continue;
+    }
+    const snap = state.activityHistory?.[iso];
+    const rec = snap?.habits?.find(x => x.id === h.id);
+
+    // Today is still an open day. Whether it has a snapshot or not, an
+    // incomplete today must not erase the completed streak that ended
+    // yesterday. The streak card represents the latest active completed run.
+    if (firstScheduledDay && iso === todayISO() && (!rec || Number(rec.percent) < 100)) {
+      firstScheduledDay = false;
+      d.setDate(d.getDate() - 1);
+      continue;
+    }
+
+    firstScheduledDay = false;
+    if (!rec || Number(rec.percent) < 100) break;
+    run++;
+    d.setDate(d.getDate() - 1);
   }
   habitStreakCache.set(cacheKey, run);
   return run;
@@ -2091,18 +2122,19 @@ function habitRow(h, opts = {}) {
   </article>`;
 }
 
-function dashboard() { const habits = sortHabitsForDisplay(state.habits.filter(h => !h.paused && habitScheduledOnDate(h, todayISO()))), total = habits.length, avg = dailyProgress(todayISO()), completed = habits.filter(h => pct(h) >= 100).length, weekly = weeklyActivityData(new Date()), recorded = weekly.filter(x => x.value !== null), weekAvg = recorded.length ? Math.round(recorded.reduce((a, x) => a + x.value, 0) / recorded.length) : 0; return shell('dashboard', `${greeting()}<section class="stats-grid dashboard-stats"><article class="stat-card"><div class="progress-ring" style="--p:${avg}%"><span>${avg}%</span></div><h2>Today's Progress</h2><p>${avg >= 75 ? 'Great going!' : 'Keep building!'}</p></article><article class="stat-card"><div class="stat-emoji fire">🔥</div><div class="big-number">${currentStreak()}</div><h2>Current Streak</h2><p>days</p></article><article class="stat-card"><div class="stat-emoji trophy">🏆</div><div class="big-number">${bestStreak()}</div><h2>Best Streak</h2><p>days</p></article><article class="stat-card"><div class="stat-emoji check">✓</div><div class="big-number">${completed}</div><h2>Completed Today</h2><p>out of ${total}</p></article><article class="stat-card"><div class="stat-emoji trend">↗</div><div class="big-number">${weekAvg}%</div><h2>Consistency</h2><p>This week</p></article><article class="stat-card thunder-stat-card"><div class="stat-emoji thunder-stat">${thunderIcon()}</div><div class="big-number" data-thunder-count>${Math.max(0,Math.min(2,Number(state.streakRecovery?.thunders)||0))}</div><h2>Thunder</h2><p>streak restores</p></article></section><section class="dashboard-grid"><article class="panel habits-panel"><div class="panel-header"><div><h2>Today's Habits</h2><div class="filters" data-filter-group="dashboard"><button class="filter active" data-filter="All">All</button><button class="filter" data-filter="Health">Health</button><button class="filter" data-filter="Fitness">Fitness</button><button class="filter" data-filter="Study">Study</button><button class="filter" data-filter="Personal">Personal</button><button class="filter" data-filter="Mindfulness">Mindfulness</button></div></div><button class="primary-btn" data-open-habit>+ Add Habit</button></div><div class="habit-list" id="dashboardHabits">${habits.map(h => habitRow(h)).join('')}</div><button class="view-link" data-route="habits">View all habits →</button></article><div class="right-column"><article class="panel weekly-panel"><div class="panel-title-row"><div><h2>Weekly Activity</h2><p class="panel-subtitle">Actual recorded completion this week</p></div><span class="week-total">${weekAvg}%</span></div><div class="activity-chart" id="dashboardWeeklyChart">${weekly.map(x => `<div class="activity-day ${x.value === null ? 'future' : ''}"><span class="bar-value">${x.value === null ? '' : x.value + '%'}</span><div class="bar"><i style="height:${x.value === null ? 0 : x.value}%"></i></div><b>${x.label}</b></div>`).join('')}</div></article></div></section>`); }
+function currentHabitStreakLeader() { const list = state.habits.filter(h => h && !h.paused).map(h => ({ h, streak: habitStreak(h) })).filter(x => x.streak > 0).sort((a,b) => b.streak - a.streak || String(a.h.name||'').localeCompare(String(b.h.name||''))); return list[0] || null; }
+function dashboard() { const habits = sortHabitsForDisplay(state.habits.filter(h => !h.paused && habitScheduledOnDate(h, todayISO()))), total = habits.length, avg = dailyProgress(todayISO()), completed = habits.filter(h => pct(h) >= 100).length, weekly = weeklyActivityData(new Date()), recorded = weekly.filter(x => x.value !== null), weekAvg = recorded.length ? Math.round(recorded.reduce((a, x) => a + x.value, 0) / recorded.length) : 0; return shell('dashboard', `${greeting()}<section class="stats-grid dashboard-stats"><article class="stat-card"><div class="progress-ring" style="--p:${avg}%"><span>${avg}%</span></div><h2>Today's Progress</h2><p>${avg >= 75 ? 'Great going!' : 'Keep building!'}</p></article><article class="stat-card"><div class="stat-emoji fire">🔥</div><div class="big-number">${currentHabitStreakLeader()?.streak || 0}</div><h2>Current Streak</h2><p class="streak-leader-name">${currentHabitStreakLeader()?.h ? esc(currentHabitStreakLeader().h.name) : 'No active streak'}</p></article><article class="stat-card"><div class="stat-emoji trophy">🏆</div><div class="big-number">${bestStreak()}</div><h2>Best Streak</h2><p>days</p></article><article class="stat-card"><div class="stat-emoji check">✓</div><div class="big-number">${completed}</div><h2>Completed Today</h2><p>out of ${total}</p></article><article class="stat-card"><div class="stat-emoji trend">↗</div><div class="big-number">${weekAvg}%</div><h2>Consistency</h2><p>This week</p></article><article class="stat-card thunder-stat-card"><div class="stat-emoji thunder-stat">${thunderIcon()}</div><div class="big-number" data-thunder-count>${Math.max(0,Math.min(2,Number(state.streakRecovery?.thunders)||0))}</div><h2>Thunder</h2><p>streak restores</p></article></section><section class="dashboard-grid"><article class="panel habits-panel"><div class="panel-header"><div><h2>Today's Habits</h2><div class="filters" data-filter-group="dashboard"><button class="filter active" data-filter="All">All</button>${[...new Set(state.habits.map(h => String(h.category || 'Other').trim()).filter(Boolean))].sort().map(c => `<button class="filter" data-filter="${esc(c)}">${esc(c)}</button>`).join('')}</div></div><button class="primary-btn" data-open-habit>+ Add Habit</button></div><div class="habit-list" id="dashboardHabits">${habits.map(h => habitRow(h)).join('')}</div><button class="view-link" data-route="habits">View all habits →</button></article><div class="right-column"><article class="panel weekly-panel"><div class="panel-title-row"><div><h2>Weekly Activity</h2><p class="panel-subtitle">Actual recorded completion this week</p></div><span class="week-total">${weekAvg}%</span></div><div class="activity-chart" id="dashboardWeeklyChart">${weekly.map(x => `<div class="activity-day ${x.value === null ? 'future' : ''}"><span class="bar-value">${x.value === null ? '' : x.value + '%'}</span><div class="bar"><i style="height:${x.value === null ? 0 : x.value}%"></i></div><b>${x.label}</b></div>`).join('')}</div></article></div></section>`); }
 
 function habitsPage() {
   const avg = Math.round(state.habits.reduce((a, h) => a + pct(h), 0) / Math.max(1, state.habits.length));
   return shell('habits', `<div class="page-title"><span class="eyebrow">YOUR ROUTINES</span><h1>My Habits</h1><p>Build better habits, achieve your goals.</p></div><div class="page-actions"><button class="primary-btn" data-open-habit>+ Add Habit</button></div>
- <section class="habit-summary"><article class="summary-card"><div class="summary-icon purple">☷</div><div><strong>${state.habits.length}</strong><span>Total Habits</span><small>All time</small></div></article><article class="summary-card"><div class="summary-icon green">✓</div><div><strong>${state.habits.filter(h => !h.paused).length}</strong><span>Active Habits</span><small>Keep going!</small></div></article><article class="summary-card"><div class="summary-icon blue">▥</div><div><strong>${avg}%</strong><span>Average Progress</span><small>This month</small></div></article><article class="summary-card"><div class="summary-icon orange">🔥</div><div><strong>${currentStreak()}</strong><span>Current Streak</span><small>days</small></div></article></section>
- <section class="panel habits-page-panel"><div class="list-toolbar"><div class="filters" id="habitFilters"><button class="filter active" data-habit-filter="all">All Habits</button><button class="filter" data-habit-filter="active">Active</button><button class="filter" data-habit-filter="completed">Completed</button><button class="filter" data-habit-filter="paused">Paused</button></div><label class="sort-select">Sort by:<select id="habitSort"><option value="priority" selected>Priority &amp; completion</option><option value="recent">Recent</option><option value="progress">Progress</option><option value="name">Name</option></select>${icon('chevron')}</label></div><div class="habit-list full" id="habitCards"></div></section>`);
+ <section class="habit-summary"><article class="summary-card"><div class="summary-icon purple">☷</div><div><strong>${state.habits.length}</strong><span>Total Habits</span><small>All time</small></div></article><article class="summary-card"><div class="summary-icon green">✓</div><div><strong>${state.habits.filter(h => !h.paused).length}</strong><span>Active Habits</span><small>Keep going!</small></div></article><article class="summary-card"><div class="summary-icon blue">▥</div><div><strong>${avg}%</strong><span>Average Progress</span><small>This month</small></div></article><article class="summary-card"><div class="summary-icon orange">🔥</div><div><strong>${currentHabitStreakLeader()?.streak || 0}</strong><span>Current Streak</span><small>${currentHabitStreakLeader()?.h ? esc(currentHabitStreakLeader().h.name) : 'No active streak'}</small></div></article></section>
+ <section class="panel habits-page-panel"><div class="list-toolbar"><div class="filters" id="habitFilters"><button class="filter active" data-habit-filter="all">All Habits</button><button class="filter" data-habit-filter="active">Active</button><button class="filter" data-habit-filter="completed">Completed</button><button class="filter" data-habit-filter="paused">Paused</button>${[...new Set(state.habits.map(h => String(h.category || 'Other').trim()).filter(Boolean))].sort().map(c => `<button class="filter" data-habit-filter="category:${esc(c)}">${esc(c)}</button>`).join('')}</div><label class="sort-select">Sort by:<select id="habitSort"><option value="priority" selected>Priority &amp; completion</option><option value="recent">Recent</option><option value="progress">Progress</option><option value="name">Name</option></select>${icon('chevron')}</label></div><div class="habit-list full" id="habitCards"></div></section>`);
 }
 function renderHabitCards(filter = 'all', sort = 'priority') {
   const root = document.getElementById('habitCards'); if (!root) return;
   let list = [...state.habits];
-  if (filter === 'active') list = list.filter(h => !h.paused && pct(h) < 100); if (filter === 'completed') list = list.filter(h => pct(h) >= 100); if (filter === 'paused') list = list.filter(h => h.paused);
+  if (filter === 'active') list = list.filter(h => !h.paused && pct(h) < 100); if (filter === 'completed') list = list.filter(h => pct(h) >= 100); if (filter === 'paused') list = list.filter(h => h.paused); if (String(filter).startsWith('category:')) { const category = String(filter).slice(9); list = list.filter(h => String(h.category || 'Other') === category); }
   const completionFirst = (a,b) => (pct(a) >= 100 ? 1 : 0) - (pct(b) >= 100 ? 1 : 0);
   if (sort === 'priority') list = sortHabitsForDisplay(list);
   if (sort === 'progress') list.sort((a, b) => completionFirst(a,b) || (pct(a) - pct(b)) || (habitPriorityValue(b) - habitPriorityValue(a)));
@@ -2182,7 +2214,7 @@ function initCalendar() { let cursor = new Date(calendarSelectedDate + 'T12:00:0
     root.querySelectorAll('[data-delete-event]').forEach(b => b.addEventListener('click', () => { const e = state.events.find(x => x.id === b.dataset.deleteEvent); if (!e) return; state.events = state.events.filter(x => x.id !== e.id); const linked = state.reminders.filter(r => r.eventId === e.id); state.reminders = state.reminders.filter(r => r.eventId !== e.id); state.syncMeta = state.syncMeta || clone(defaultState.syncMeta); state.syncMeta.deleted = state.syncMeta.deleted || clone(defaultState.syncMeta.deleted); state.syncMeta.deleted.events = state.syncMeta.deleted.events || {}; state.syncMeta.deleted.events[e.id] = new Date().toISOString(); state.syncMeta.deleted.reminders = state.syncMeta.deleted.reminders || {}; linked.forEach(r => state.syncMeta.deleted.reminders[r.id] = new Date().toISOString()); save(); renderCal(); })); renderDetail(); } function renderDetail() { const d = dateISO(cursor), dayHabits = calendarHabitsForDay(cursor), p = dailyProgress(d), items = state.events.filter(e => e.date === d), completed = dayHabits.filter(x => x.percent >= 100).length, partial = dayHabits.filter(x => x.percent > 0 && x.percent < 100).length, notStarted = dayHabits.filter(x => x.percent === 0).length; root.querySelector('#dayDetail').innerHTML = `<div class="detail-kicker">Selected day</div><div class="detail-title">${cursor.toLocaleDateString('en-IN', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}</div><div class="daily-progress"><span>Daily progress</span><strong>${p}%</strong></div><div class="calendar-day-meta"><span>✓ ${completed} completed</span><span>◐ ${partial} in progress</span><span>○ ${notStarted} not started</span><span>📅 ${items.length} event${items.length===1?'':'s'}</span></div><div class="progress-line"><i style="width:${p}%"></i></div><div class="detail-section-label">Habit activity</div>${isThunderEligibleDate(d) && !(state.streakRecovery?.restoredDates||{})[d] ? `<button type="button" class="thunder-restore-btn" data-thunder-restore="${d}">⚡ Restore this day · ${Number(state.streakRecovery?.thunders||0)} available</button>` : (state.streakRecovery?.restoredDates||{})[d] ? `<div class="thunder-restored-note"><span>${thunderIcon()}</span><div><b>Streak history restored</b><small>This day was recovered with Thunder. Existing streaks were recalculated from the restored history.</small></div></div>` : ''}<div class="detail-items">${dayHabits.map(x => `<div class="detail-item ${x.percent>=100?'is-complete':x.percent>0?'is-partial':''}"><span class="item-emoji">${esc(x.habit.emoji || '')}</span><span>${esc(x.habit.name)}</span><small>${x.percent}%</small></div>`).join('') || '<p class="muted-copy">No scheduled habits for this date.</p>'}${items.length ? `<div class="detail-section-label event-label">Events</div>${items.map(e => `<div class="detail-item"><span class="item-emoji">${esc(e.emoji || '📅')}</span><span>${esc(e.title)}</span><small>${esc(formatTime(e.time))}</small><button class="icon-delete" data-edit-event="${e.id}" aria-label="Edit event">${icon('edit')}</button><button class="icon-delete" data-delete-event="${e.id}" aria-label="Delete event">${icon('trash')}</button></div>`).join('')}` : ''}</div>`; root.querySelectorAll('[data-thunder-restore]').forEach(b => b.addEventListener('click', () => openThunderEditor(b.dataset.thunderRestore))); const reminderList = root.querySelector('#calendarReminderList'); if (reminderList) { reminderList.innerHTML = reminderOverviewMarkup(d); root.querySelectorAll('[data-add-reminder]').forEach(b => b.addEventListener('click', () => reminderForm())); } root.querySelectorAll('[data-edit-event]').forEach(b => b.addEventListener('click', () => eventForm(b.dataset.editEvent)));
     root.querySelectorAll('[data-delete-event]').forEach(b => b.addEventListener('click', () => { const e = state.events.find(x => x.id === b.dataset.deleteEvent); if (!e) return; state.events = state.events.filter(x => x.id !== e.id); const linked = state.reminders.filter(r => r.eventId === e.id); state.reminders = state.reminders.filter(r => r.eventId !== e.id); state.syncMeta = state.syncMeta || clone(defaultState.syncMeta); state.syncMeta.deleted = state.syncMeta.deleted || clone(defaultState.syncMeta.deleted); state.syncMeta.deleted.events = state.syncMeta.deleted.events || {}; state.syncMeta.deleted.events[e.id] = new Date().toISOString(); state.syncMeta.deleted.reminders = state.syncMeta.deleted.reminders || {}; linked.forEach(r => state.syncMeta.deleted.reminders[r.id] = new Date().toISOString()); save(); renderCal(); })); root.querySelectorAll('[data-edit-reminder]').forEach(b => b.addEventListener('click', () => reminderForm(b.dataset.editReminder))); root.querySelectorAll('[data-toggle-reminder]').forEach(b => b.addEventListener('change', () => { const r = state.reminders.find(x => x.id === b.dataset.toggleReminder); if (!r) return; r.enabled = b.checked; save(); renderCal(); toast(r.enabled ? 'Reminder enabled' : 'Reminder turned off'); })); } root.querySelectorAll('#calModes button').forEach(b => b.addEventListener('click', () => { mode = b.dataset.mode; root.querySelectorAll('#calModes button').forEach(x => x.classList.toggle('active', x === b)); picker.classList.add('hidden'); rebuildPicker(); renderCal(); })); root.querySelector('#calPrev').addEventListener('click', () => { if (mode === 'month') cursor = new Date(cursor.getFullYear(), cursor.getMonth() - 1, Math.min(cursor.getDate(), 28), 12); else if (mode === 'week') { cursor = new Date(cursor); cursor.setDate(cursor.getDate() - 7); } else { cursor = new Date(cursor); cursor.setDate(cursor.getDate() - 1); } calendarSelectedDate = dateISO(cursor); picker.classList.add('hidden'); rebuildPicker(); renderCal(); }); root.querySelector('#calNext').addEventListener('click', () => { if (mode === 'month') cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, Math.min(cursor.getDate(), 28), 12); else if (mode === 'week') { cursor = new Date(cursor); cursor.setDate(cursor.getDate() + 7); } else { cursor = new Date(cursor); cursor.setDate(cursor.getDate() + 1); } calendarSelectedDate = dateISO(cursor); picker.classList.add('hidden'); rebuildPicker(); renderCal(); }); root.querySelector('#calToday').addEventListener('click', () => { cursor = new Date(); cursor.setHours(12, 0, 0, 0); calendarSelectedDate = dateISO(cursor); picker.classList.add('hidden'); rebuildPicker(); renderCal(); }); title.addEventListener('click', () => { rebuildPicker(); picker.classList.toggle('hidden'); }); calendarSelectedDate = dateISO(cursor); rebuildPicker(); renderCal(); }
 
-function statisticsHeatmapMarkup() { const end=new Date(todayISO()+'T12:00:00'); const start=new Date(end); start.setDate(end.getDate()-83); const cells=[]; for(let i=0;i<84;i++){const d=new Date(start); d.setDate(start.getDate()+i); const iso=dateISO(d), p=state.activityHistory?.[iso]?dailyProgress(iso):0; const level=p>=100?6:p>=80?5:p>=60?4:p>=40?3:p>=20?2:p>0?1:0; cells.push(`<span class="heat-cell level-${level}" title="${iso}: ${p}%" aria-label="${iso}: ${p}%"></span>`);} return `<section class="panel heatmap-panel"><div class="panel-title-row"><div><h2>Consistency Heatmap</h2><p class="panel-subtitle">Last 12 weeks · each square shows that day's completion</p></div><span class="heat-legend"><i class="heat-key level-0"></i>0 <i class="heat-key level-1"></i>1–19 <i class="heat-key level-2"></i>20–39 <i class="heat-key level-3"></i>40–59 <i class="heat-key level-4"></i>60–79 <i class="heat-key level-5"></i>80–99 <i class="heat-key level-6"></i>100%</span></div><div class="heatmap">${cells.join('')}</div></section>`; }
+function statisticsHeatmapMarkup() { const end=new Date(todayISO()+'T12:00:00'); const start=new Date(end); start.setDate(end.getDate()-83); const cells=[]; for(let i=0;i<84;i++){const d=new Date(start); d.setDate(start.getDate()+i); const iso=dateISO(d), p=state.activityHistory?.[iso]?dailyProgress(iso):0; const level=p>=100?6:p>=80?5:p>=60?4:p>=40?3:p>=20?2:p>0?1:0; cells.push(`<button type="button" class="heat-cell level-${level}" data-heat-date="${iso}" data-heat-value="${p}" title="${iso}: ${p}%" aria-label="${iso}: ${p}%"></button>`);} return `<section class="panel heatmap-panel"><div class="panel-title-row"><div><h2>Consistency Heatmap</h2><p class="panel-subtitle">Last 12 weeks · each square shows that day's completion</p></div><span class="heat-legend"><i class="heat-key level-0"></i>0 <i class="heat-key level-1"></i>1–19 <i class="heat-key level-2"></i>20–39 <i class="heat-key level-3"></i>40–59 <i class="heat-key level-4"></i>60–79 <i class="heat-key level-5"></i>80–99 <i class="heat-key level-6"></i>100%</span></div><div class="heatmap">${cells.join('')}</div></section>`; }
 function statisticsPage() { return shell('statistics', `<div class="page-title statistics-title"><h1>Statistics</h1><p>Track your progress and build better habits.</p></div><div class="statistics-controls"><div class="period-switch" id="statPeriods"><button class="active" data-period="day">Day</button><button data-period="week">Week</button><button data-period="month">Month</button><button data-period="custom">Custom Range</button></div><div class="stat-date">${icon('calendar')}<span id="statDate"></span></div><button class="export-btn" id="exportStats">${icon('download')} Export</button></div><section class="kpi-grid" id="statKpis"></section><section class="statistics-grid"><article class="panel trend-panel"><div class="panel-title-row"><h2>Completion Trend</h2><select id="chartMode"><option value="day">Daily</option><option value="week">Weekly</option><option value="month">Monthly</option><option value="custom">Custom</option></select></div><div id="trendChart" class="trend-chart"></div><div class="trend-legend"><span><i></i> Completion</span><span id="trendCaption">Recorded activity</span></div></article><article class="panel performers"><h2>Top Performers</h2><div id="topPerformers"></div></article></section>${statisticsHeatmapMarkup()}<section class="panel insights-panel"><div class="panel-title-row"><div><h2>Insights</h2><p class="panel-subtitle">Simple takeaways from your recorded activity.</p></div><span class="insight-badge">Personal</span></div><div id="statInsights" class="insights-grid"></div></section><section class="panel categories-panel"><h2>Habit Categories</h2><div id="categories" class="categories-grid"></div></section>`); }
 function customRangeForm(apply) { modal('Custom range', 'Choose the period used by Statistics.', `<form class="form" id="rangeForm"><div class="form-grid"><div class="field"><label>Start date</label><input type="date" name="start" value="${todayISO()}" required></div><div class="field"><label>End date</label><input type="date" name="end" value="${todayISO()}" required></div></div><div class="form-actions"><button type="button" class="secondary-btn" data-modal-close>Cancel</button><button class="primary-btn">Apply range →</button></div></form>`); document.getElementById('rangeForm').addEventListener('submit', e => { e.preventDefault(); const fd = new FormData(e.target), s = fd.get('start'), en = fd.get('end'); if (s > en) { toast('End date must be after the start date'); return; } apply(s, en); closeModal(); }); }
 function dateRange(start, end) { const out = []; let d = new Date(start + 'T12:00:00'), last = new Date(end + 'T12:00:00'); while (d <= last) { out.push(new Date(d)); d.setDate(d.getDate() + 1); } return out; }
@@ -2193,7 +2225,7 @@ function trendSeries(period, custom) { const today = new Date(todayISO() + 'T12:
 function initStatistics() {
   let period = 'day', custom = { s: todayISO(), e: todayISO() }; const root = document.querySelector('.page-statistics'); if (!root) return; function setDateLabel() { const el = root.querySelector('#statDate'); if (period === 'day') el.textContent = new Date().toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' }); else if (period === 'week') { const b = weekBounds(new Date()); el.textContent = `${formatDate(dateISO(b.start))} – ${formatDate(dateISO(b.days[6]))}`; } else if (period === 'month') el.textContent = new Date().toLocaleDateString('en-IN', { month: 'long', year: 'numeric' }); else el.textContent = `${formatDate(custom.s)} – ${formatDate(custom.e)}`; }
   function draw() { const vals = trendSeries(period, custom), w = 760, h = 300, p = { l: 58, r: 18, t: 24, b: 52 }, step = (w - p.l - p.r) / Math.max(1, vals.length - 1), x = i => p.l + i * step, y = v => p.t + (100 - v) * (h - p.t - p.b) / 100, pts = vals.map((v, i) => v.value === null ? null : [x(i), y(v.value)]), axis = [0, 25, 50, 75, 100].map(v => `<line x1="${p.l}" x2="${w - p.r}" y1="${y(v)}" y2="${y(v)}" stroke="#eee9f1"/><text class="chart-axis-label" x="${p.l - 10}" y="${y(v) + 4}" text-anchor="end">${v}%</text>`).join(''); let seg = [], lines = [], areas = []; const flush = () => { if (!seg.length) return; lines.push(`<polyline points="${seg.map(q => q.join(' ')).join(' ')}" fill="none" stroke="#9b63d8" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>`); if (seg.length > 1) { const a = seg[0], b = seg[seg.length - 1]; areas.push(`<path d="M ${a[0]} ${h - p.b} L ${seg.map(q => q.join(' L '))} L ${b[0]} ${h - p.b} Z" fill="#9b63d8" fill-opacity=".055"/>`); } seg = []; }; pts.forEach(pt => pt ? seg.push(pt) : flush()); flush(); const marks = vals.map((v, i) => pts[i] ? `<circle class="chart-point" tabindex="0" data-index="${i}" cx="${pts[i][0]}" cy="${pts[i][1]}" r="4" fill="#fff" stroke="#9b63d8" stroke-width="2"/><text class="chart-x-label" x="${pts[i][0]}" y="${h - 16}" text-anchor="middle">${esc(v.label)}</text>` : '').join(''); root.querySelector('#trendChart').innerHTML = `<svg viewBox="0 0 ${w} ${h}" role="img" aria-label="Recorded Habitly completion trend">${axis}${areas.join('')}${lines.join('')}${marks}</svg>`; root.querySelectorAll('.chart-point').forEach(pt => { const show = () => { root.querySelectorAll('.chart-point').forEach(x => x.classList.remove('selected')); pt.classList.add('selected'); const v = vals[Number(pt.dataset.index)]; root.querySelector('#trendCaption').textContent = `${v.label}: ${v.value}%`; }; pt.addEventListener('mouseenter', show); pt.addEventListener('focus', show); pt.addEventListener('touchstart', show, { passive: true }); pt.addEventListener('click', show); }); root.querySelector('#trendCaption').textContent = 'Recorded activity'; setDateLabel(); }
-  function updateKpis() { const dates = period === 'day' ? [todayISO()] : period === 'week' ? weeklyActivityData(new Date()).filter(x => x.value !== null).map(x => x.date) : period === 'month' ? dateRange(new Date().getFullYear() + '-' + String(new Date().getMonth() + 1).padStart(2, '0') + '-01', todayISO()).map(dateISO) : dateRange(custom.s, custom.e).map(dateISO), snaps = dates.map(d => state.activityHistory?.[d]).filter(Boolean), values = snaps.flatMap(s => s.habits.filter(h => !h.paused).map(h => h.percent)), overall = values.length ? Math.round(values.reduce((a, v) => a + v, 0) / values.length) : 0, completed = values.filter(v => v >= 100).length, missed = values.filter(v => v === 0).length, total = values.length; root.querySelector('#statKpis').innerHTML = `<article class="kpi"><div class="kpi-top"><div class="kpi-icon target">🎯</div><div class="kpi-label">Overall Completion</div></div><div class="kpi-value">${overall}%</div><div class="kpi-foot">Recorded activity</div></article><article class="kpi"><div class="kpi-top"><div class="kpi-icon complete">✓</div><div class="kpi-label">Completed</div></div><div class="kpi-value">${completed}</div><div class="kpi-foot">Fully completed activities</div></article><article class="kpi"><div class="kpi-top"><div class="kpi-icon missed">•</div><div class="kpi-label">Missed</div></div><div class="kpi-value">${missed}</div><div class="kpi-foot">Recorded at 0%</div></article><article class="kpi"><div class="kpi-top"><div class="kpi-icon activities">📊</div><div class="kpi-label">Total Activities</div></div><div class="kpi-value">${total}</div><div class="kpi-foot">Recorded habit-days</div></article><article class="kpi"><div class="kpi-top"><div class="kpi-icon streak">🔥</div><div class="kpi-label">Current Streak</div></div><div class="kpi-value">${currentStreak()} <span>days</span></div><div class="kpi-foot">Best: ${bestStreak()} days</div></article>`; const latest = state.habits.map(h => ({ h, p: pct(h) })).sort((a, b) => b.p - a.p).slice(0, 5); root.querySelector('#topPerformers').innerHTML = latest.map((x, i) => `<div class="rank"><span class="rank-num">${i + 1}</span><span class="rank-name">${esc(x.h.emoji || '')} ${esc(x.h.name)}</span><div class="rank-bar"><i style="width:${x.p}%"></i></div><strong>${x.p}%</strong></div>`).join('') || '<p class="muted-copy">No habits yet.</p>'; updateInsights(); const groups = { Health: ['💚', 'Health'], Fitness: ['🏋️', 'Fitness'], Study: ['📚', 'Productivity'], Personal: ['🌱', 'Personal Growth'], Mindfulness: ['🧘', 'Mindfulness'], Education: ['🎓', 'Learning'] }; root.querySelector('#categories').innerHTML = Object.entries(groups).map(([key, [em, name]]) => { const hs = state.habits.filter(h => h.category === key), v = hs.length ? Math.round(hs.reduce((a, h) => a + pct(h), 0) / hs.length) : 0; return `<div class="cat"><div class="cat-top"><div class="cat-icon">${em}</div><strong>${v}%</strong></div><div class="cat-name">${name}</div><div class="cat-meta">${hs.length} habit${hs.length === 1 ? '' : 's'}</div></div>`; }).join(''); }
+  function updateKpis() { const dates = period === 'day' ? [todayISO()] : period === 'week' ? weeklyActivityData(new Date()).filter(x => x.value !== null).map(x => x.date) : period === 'month' ? dateRange(new Date().getFullYear() + '-' + String(new Date().getMonth() + 1).padStart(2, '0') + '-01', todayISO()).map(dateISO) : dateRange(custom.s, custom.e).map(dateISO), snaps = dates.map(d => state.activityHistory?.[d]).filter(Boolean), values = snaps.flatMap(s => s.habits.filter(h => !h.paused).map(h => h.percent)), overall = values.length ? Math.round(values.reduce((a, v) => a + v, 0) / values.length) : 0, completed = values.filter(v => v >= 100).length, missed = values.filter(v => v === 0).length, total = values.length; root.querySelector('#statKpis').innerHTML = `<article class="kpi"><div class="kpi-top"><div class="kpi-icon target">🎯</div><div class="kpi-label">Overall Completion</div></div><div class="kpi-value">${overall}%</div><div class="kpi-foot">Recorded activity</div></article><article class="kpi"><div class="kpi-top"><div class="kpi-icon complete">✓</div><div class="kpi-label">Completed</div></div><div class="kpi-value">${completed}</div><div class="kpi-foot">Fully completed activities</div></article><article class="kpi"><div class="kpi-top"><div class="kpi-icon missed">•</div><div class="kpi-label">Missed</div></div><div class="kpi-value">${missed}</div><div class="kpi-foot">Recorded at 0%</div></article><article class="kpi"><div class="kpi-top"><div class="kpi-icon activities">📊</div><div class="kpi-label">Total Activities</div></div><div class="kpi-value">${total}</div><div class="kpi-foot">Recorded habit-days</div></article><article class="kpi"><div class="kpi-top"><div class="kpi-icon streak">🔥</div><div class="kpi-label">Current Streak</div></div><div class="kpi-value">${currentStreak()} <span>days</span></div><div class="kpi-foot">Best: ${bestStreak()} days</div></article>`; const latest = state.habits.map(h => ({ h, p: pct(h) })).sort((a, b) => b.p - a.p).slice(0, 5); root.querySelector('#topPerformers').innerHTML = latest.map((x, i) => `<div class="rank"><span class="rank-num">${i + 1}</span><span class="rank-name">${esc(x.h.emoji || '')} ${esc(x.h.name)}</span><div class="rank-bar"><i style="width:${x.p}%"></i></div><strong>${x.p}%</strong></div>`).join('') || '<p class="muted-copy">No habits yet.</p>'; updateInsights(); const categoryIcons = { Health: '💚', Fitness: '🏋️', Study: '📚', Personal: '🌱', Mindfulness: '🧘', Education: '🎓', Other: '✨' }; const categories = [...new Set(state.habits.map(h => String(h.category || 'Other').trim() || 'Other'))].sort((a,b) => a.localeCompare(b)); root.querySelector('#categories').innerHTML = categories.map(key => { const hs = state.habits.filter(h => (String(h.category || 'Other').trim() || 'Other') === key), v = hs.length ? Math.round(hs.reduce((a, h) => a + pct(h), 0) / hs.length) : 0, em = categoryIcons[key] || '✨'; return `<div class="cat"><div class="cat-top"><div class="cat-icon">${em}</div><strong>${v}%</strong></div><div class="cat-name">${esc(key)}</div><div class="cat-meta">${hs.length} habit${hs.length === 1 ? '' : 's'}</div></div>`; }).join('') || '<div class="muted-copy">No habits yet.</div>'; }
   function updateInsights() {
     const target = root.querySelector('#statInsights');
     if (!target) return;
@@ -2220,7 +2252,50 @@ function initStatistics() {
     target.innerHTML = cards.join('') || '<p class="muted-copy">Record some activity to unlock personal insights.</p>';
   }
   function applyPeriod(next) { period = next; root.querySelectorAll('[data-period]').forEach(x => x.classList.toggle('active', x.dataset.period === period)); root.querySelector('#chartMode').value = period; updateKpis(); draw(); }
-  root.querySelectorAll('[data-period]').forEach(b => b.addEventListener('click', () => { if (b.dataset.period === 'custom') customRangeForm((s, e) => { custom = { s, e }; applyPeriod('custom'); }); else applyPeriod(b.dataset.period); })); root.querySelector('#chartMode').addEventListener('change', e => { if (e.target.value === 'custom') customRangeForm((s, en) => { custom = { s, en }; applyPeriod('custom'); }); else applyPeriod(e.target.value); }); root.querySelector('#exportStats').addEventListener('click', () => { const payload = { exportedAt: new Date().toISOString(), period, customRange: period === 'custom' ? custom : null, activityHistory: state.activityHistory, habits: state.habits, goals: state.goals, events: state.events }; const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }), url = URL.createObjectURL(blob), a = document.createElement('a'); a.href = url; a.download = `habitly-statistics-${todayISO()}.json`; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000); toast('Statistics exported'); }); updateKpis(); draw();
+  root.querySelectorAll('[data-period]').forEach(b => b.addEventListener('click', () => { if (b.dataset.period === 'custom') customRangeForm((s, e) => { custom = { s, e }; applyPeriod('custom'); }); else applyPeriod(b.dataset.period); })); root.querySelector('#chartMode').addEventListener('change', e => { if (e.target.value === 'custom') customRangeForm((s, en) => { custom = { s, en }; applyPeriod('custom'); }); else applyPeriod(e.target.value); }); root.querySelector('#exportStats').addEventListener('click', () => { const payload = { exportedAt: new Date().toISOString(), period, customRange: period === 'custom' ? custom : null, activityHistory: state.activityHistory, habits: state.habits, goals: state.goals, events: state.events }; const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }), url = URL.createObjectURL(blob), a = document.createElement('a'); a.href = url; a.download = `habitly-statistics-${todayISO()}.json`; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000); toast('Statistics exported'); });
+  let heatmapDetailTimer = null;
+  function closeHeatmapDetail() {
+    if (heatmapDetailTimer) { clearTimeout(heatmapDetailTimer); heatmapDetailTimer = null; }
+    document.querySelectorAll('.heatmap-detail-popover').forEach(x => x.remove());
+  }
+  function showHeatmapDetail(cell) {
+    closeHeatmapDetail();
+    const iso = cell.dataset.heatDate;
+    const value = Number(cell.dataset.heatValue) || 0;
+    const d = new Date(iso + 'T12:00:00');
+    const pop = document.createElement('div');
+    pop.className = 'heatmap-detail-popover';
+    pop.setAttribute('role', 'dialog');
+    pop.setAttribute('aria-label', 'Heatmap day details');
+    pop.innerHTML = `<button type="button" class="heatmap-detail-close" data-heat-close aria-label="Close heatmap details">×</button><strong>${esc(d.toLocaleDateString('en-IN',{weekday:'long',day:'numeric',month:'short',year:'numeric'}))}</strong><span>${value}% completion</span>`;
+    document.body.appendChild(pop);
+    if (window.matchMedia?.('(max-width: 520px)').matches) {
+      pop.classList.add('mobile');
+    } else {
+      const rect = cell.getBoundingClientRect();
+      const width = 200;
+      pop.style.left = `${Math.max(10, Math.min(window.innerWidth - width - 10, rect.left))}px`;
+      pop.style.top = `${Math.min(window.innerHeight - 90, rect.bottom + 8)}px`;
+    }
+    // The popup lives under <body>, not inside the statistics root, so close via
+    // document-level delegated handling. This is reliable for mouse, touch and pointer input.
+    heatmapDetailTimer = setTimeout(closeHeatmapDetail, 3000);
+  }
+  root.addEventListener('click', e => {
+    const cell = e.target.closest?.('[data-heat-date]');
+    if (cell) { e.preventDefault(); e.stopPropagation(); showHeatmapDetail(cell); return; }
+    if (!e.target.closest('.heatmap-detail-popover')) closeHeatmapDetail();
+  });
+  document.addEventListener('pointerup', e => {
+    const close = e.target.closest?.('[data-heat-close]');
+    if (close) { e.preventDefault(); e.stopPropagation(); closeHeatmapDetail(); }
+  }, true);
+  document.addEventListener('click', e => {
+    const close = e.target.closest?.('[data-heat-close]');
+    if (close) { e.preventDefault(); e.stopPropagation(); closeHeatmapDetail(); }
+  }, true);
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && document.querySelector('.page-statistics')) closeHeatmapDetail(); });
+  updateKpis(); draw();
 }
 
 function menuPopover(kind, id) { document.querySelectorAll('.menu-popover').forEach(x => x.remove()); const isGoal = kind === 'goal', habit = !isGoal ? state.habits.find(h => h.id === id) : null, hasReminder = habit ? state.reminders.some(r => r.habitId === id && r.source === 'manual') : false, items = isGoal ? [['update', 'Update progress'], ['edit', 'Edit goal'], ['pause', 'Pause goal'], ['complete', 'Mark complete'], ['trash', 'Delete goal']] : [['edit', 'Edit habit'], ['reminder', hasReminder ? 'Edit reminder' : 'Set reminder'], ['pause', habit?.paused ? 'Resume habit' : 'Pause habit'], ['trash', 'Delete habit']]; const menu = document.createElement('div'); menu.className = 'menu-popover'; menu.dataset.kind = kind; menu.innerHTML = items.map(([i, t]) => `<button data-menu-action="${i}" data-menu-id="${id}">${icon(i === 'reminder' ? 'bell' : i)}<span>${t}</span></button>`).join(''); const anchor = document.querySelector(`[data-menu="${kind}:${id}"]`); if (!anchor) return; anchor.closest('article').appendChild(menu); const rect = anchor.getBoundingClientRect(); const card = anchor.closest('article').getBoundingClientRect(); menu.style.top = `${Math.min(anchor.offsetTop + 38, card.height - menu.offsetHeight - 10)}px`; menu.style.right = '8px'; }
@@ -2228,7 +2303,7 @@ function bindHabitInteractions(root) {
   root.querySelectorAll('[data-habit-action]').forEach(b => {
     let holdTimer = null, repeatTimer = null, holding = false, wasHeld = false;
     const updateRowVisual = (h, row) => {
-      if (!row) return;
+      if (!row || !row.isConnected) return;
       const current = Math.max(0, Number(h.current) || 0);
       const target = Math.max(1, Number(h.target) || 1);
       const percent = Math.min(100, Math.round(current / target * 100));
@@ -2238,12 +2313,36 @@ function bindHabitInteractions(root) {
       if (value) value.textContent = `${current} / ${target} ${h.unit || 'times'}`;
       if (bar) bar.style.width = `${percent}%`;
       if (pctEl) pctEl.textContent = `${percent}%`;
+
+      row.querySelectorAll('.yesno-choice').forEach(choice => {
+        const yes = choice.dataset.habitAction === 'yes';
+        const selected = yes ? current >= 1 : current < 1;
+        choice.classList.toggle('selected', selected);
+        choice.setAttribute('aria-pressed', String(selected));
+      });
+
       const complete = row.querySelector('[data-habit-action="complete"]');
       if (complete) {
         const done = percent >= 100;
         complete.disabled = !done;
         complete.classList.toggle('done', done);
         complete.innerHTML = `<img src="${done ? AS + 'Habitly Leaf White.png' : AS + 'Habitly Leaf Transparent.png'}" alt="${done ? 'Completed' : 'Not complete'}">`;
+      }
+
+      const name = row.querySelector('.habit-name');
+      let streakEl = name?.querySelector('.habit-streak');
+      const streak = habitStreak(h);
+      if (name) {
+        if (streak > 0) {
+          if (!streakEl) {
+            streakEl = document.createElement('small');
+            streakEl.className = 'habit-streak';
+            name.appendChild(streakEl);
+          }
+          streakEl.textContent = `🔥 ${streak}d streak`;
+        } else if (streakEl) {
+          streakEl.remove();
+        }
       }
     };
     const applyAction = (action, amount = 1, shouldRender = true) => {
@@ -2263,13 +2362,14 @@ function bindHabitInteractions(root) {
       h.dailyUpdatedAt[todayISO()] = new Date().toISOString();
       const undoCurrent = beforeCurrent;
       save();
+      habitStreakCache.clear();
       const afterPercent = habitPctForDate(h, todayISO());
       const justCompleted = beforePercent < 100 && afterPercent >= 100;
-      if (shouldRender) {
-        render();
-        if (justCompleted) celebrateHabitCompletion(h.id);
-        showUndoToast(action === 'yes' || action === 'complete' ? 'Habit completed' : 'Habit updated', () => { const live=state.habits.find(x=>x.id===h.id); if(!live) return; live.current=Math.max(0,Math.min(Number(live.target)||1,undoCurrent)); live.daily=live.daily||{}; live.daily[todayISO()]=live.current; live.dailyUpdatedAt=live.dailyUpdatedAt||{}; live.dailyUpdatedAt[todayISO()]=new Date().toISOString(); save(); render(); toast('Change undone'); });
-      } else updateRowVisual(h, row);
+      if (shouldRender) render();
+      else updateRowVisual(h, row);
+      if (justCompleted) celebrateHabitCompletion(h.id);
+      if (shouldRender || !holding) showUndoToast(action === 'yes' || action === 'complete' ? 'Habit completed' : 'Habit updated', () => { const live=state.habits.find(x=>x.id===h.id); if(!live) return; live.current=Math.max(0,Math.min(Number(live.target)||1,undoCurrent)); live.daily=live.daily||{}; live.daily[todayISO()]=live.current; live.dailyUpdatedAt=live.dailyUpdatedAt||{}; live.dailyUpdatedAt[todayISO()]=new Date().toISOString(); save(); habitStreakCache.clear(); const liveRow=root.querySelector(`.habit-row[data-id="${CSS.escape(live.id)}"]`); if (liveRow) updateRowVisual(live, liveRow); else render(); toast('Change undone'); });
+      return { row, habit: h, justCompleted };
     };
     const action = b.dataset.habitAction;
     const startHold = e => {
@@ -2308,10 +2408,14 @@ function bindHabitInteractions(root) {
       // The pointerup is followed by a click on most browsers. Keep the flag
       // until that click arrives so a long press cannot add one extra unit;
       // the click handler consumes it instead of adding another unit.
+      const liveRow = b.closest('.habit-row');
+      const liveHabit = state.habits.find(x => x.id === liveRow?.dataset.id);
+      if (liveRow && liveHabit) updateRowVisual(liveHabit, liveRow);
     };
     b.addEventListener('click', e => {
       if (wasHeld) { e.preventDefault(); e.stopPropagation(); wasHeld = false; return; }
-      applyAction(action, 1, true);
+      const result = applyAction(action, 1, false);
+      if (result?.row && result?.habit) updateRowVisual(result.habit, result.row);
     });
     b.addEventListener('pointerdown', startHold);
     b.addEventListener('pointerup', stopHold);
@@ -3862,7 +3966,7 @@ function clearAuthenticatedState() {
   syncBaseState = null;
   syncLastSavedSnapshot = null;
   syncGeneration = 0;
-  syncDirty = { habits:false, goals:false, events:false, reminders:false, profile:false, settings:false, activityHistory:false };
+  syncDirty = { habits:false, goals:false, events:false, reminders:false, profile:false, settings:false, activityHistory:false, streakRecovery:false };
   state = freshUserState(null);
   appPhase = 'READY';
   closeModal();
