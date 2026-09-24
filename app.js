@@ -2,7 +2,7 @@
    Dashboard / Habits / Goals / Calendar / Statistics
 */
 const AS = 'assets/';
-const APP_VERSION = '5.0.9';
+const APP_VERSION = '5.1.3';
 const ROUTES = ['dashboard', 'habits', 'goals', 'calendar', 'statistics', 'settings'];
 const STORAGE = 'habitly.final.v2';
 const USER_STORAGE_PREFIX = 'habitly.final.v3.user.';
@@ -92,7 +92,7 @@ const defaultState = {
   profile: { name: '', email: '', avatar: '' },
   activityHistory: {},
   streakRecovery: { thunders: 2, rewardedPerfectDays: 0, restoredDates: {} },
-  syncMeta: { deleted: { habits: {}, goals: {}, events: {}, reminders: {} }, recordVersions: { habits: {}, goals: {}, events: {}, reminders: {} }, pending: { habits: false, goals: false, events: false, reminders: false, profile: false, settings: false, activityHistory: false }, mutations: [] },
+  syncMeta: { deleted: { habits: {}, goals: {}, events: {}, reminders: {} }, recordVersions: { habits: {}, goals: {}, events: {}, reminders: {} }, pending: { habits: false, goals: false, events: false, reminders: false, profile: false, settings: false, activityHistory: false, streakRecovery: false }, mutations: [] },
   settings: {
     timeFormat: '12h',
     notifications: { daily: true, habitReminders: true, eventReminders: true, motivational: true, weekly: true, goal: true, defaultHabitTime: '20:00:00', defaultHabitDays: [0,1,2,3,4,5,6] },
@@ -775,10 +775,11 @@ function save(options = {}) {
 }
 
 function cloudStorageSelected() {
-  // Supabase is the ONLY active cross-device data synchronization authority.
-  // Google Drive is backup/restore only and never hydrates or overwrites the
-  // working state automatically. This removes the old Drive-vs-device race.
-  return !!currentAuthUser && storageIsConfigured() && storageMode() === 'cloud' && !!window.habitlySupabase;
+  // Authenticated Habitly accounts always use Supabase as the authoritative
+  // cross-device source. Do not let a stale/missing local setup flag silently
+  // disable cloud sync after login; handleAuthenticatedUser() already forces
+  // authenticated accounts into cloud mode.
+  return !!currentAuthUser && storageMode() === 'cloud' && !!window.habitlySupabase;
 }
 function ensureCloudDeviceId() {
   if (cloudDeviceId) return cloudDeviceId;
@@ -808,6 +809,7 @@ function cloudStatusText() {
   }
   return cloudSyncAvailable ? 'Ready to sync' : 'Sync unavailable — local data is safe';
 }
+function refreshCloudStatusUI(){ document.querySelectorAll('.sync-pill').forEach(el=>{ const err=!!cloudSyncError; el.classList.toggle('error',err); el.textContent=err?'⚠ Sync issue':cloudSyncPending?'↻ Syncing…':'✓ Synced'; }); document.querySelectorAll('.backup-status-line').forEach(el=>{ if(el.closest('.drive-backup-card')) return; el.innerHTML=`${icon(cloudSyncError?'info':'check')}<span>${esc(cloudStatusText())}</span>`; el.classList.toggle('waiting',!!cloudSyncError||cloudSyncPending); el.classList.toggle('ready',!cloudSyncError&&!cloudSyncPending); }); }
 function cloudDocumentState(source = state, revisionOverride = cloudRevision, committedMutations = []) {
   const doc = normalizeState(clone(source || {}));
   doc.syncMeta = doc.syncMeta || clone(defaultState.syncMeta);
@@ -3995,6 +3997,7 @@ if (typeof window !== 'undefined') {
     flushCloudSync: () => flushCloudSync(),
     reconcileCloudDocument: () => reconcileCloudDocument(),
     cloudStatusText: () => cloudStatusText(),
+    syncDiagnostics: () => ({ authenticated: !!currentAuthUser?.id, storage: storageMode(), hasSupabase: !!window.habitlySupabase, online: navigator.onLine, busy: cloudSyncBusy, queued: cloudSyncQueued, pending: pendingMutations(state).length, cloudPending: cloudSyncPending, revision: cloudRevision, localRevision: Number(state?.syncMeta?.cloudRevision)||0, hasBaseline: !!syncBaseState }),
     eventNotificationCount: () => eventNotificationCount(),
     normalizeReminderDays: days => normalizeReminderDays(days),
     nextReminderOccurrence: (r, from) => nextReminderOccurrence(r, from),
